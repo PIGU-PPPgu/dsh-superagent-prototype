@@ -312,6 +312,8 @@ div.dt-preview-head { color: var(--dsw-alias-label-secondary); }
 .dt-part { display: flex; flex-direction: column; gap: 12px; }
 .dt-rows-summary { text-align: left; color: var(--dsw-alias-label-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
 .dt-table { width: 100%; border-collapse: collapse; font-size: 12px; line-height: 18px; }
+.dt-codex .dt-table-wrap { overflow-x: auto; margin: 16px 0; }
+.dt-codex .dt-table { min-width: 620px; }
 .dt-table th { text-align: left; font-weight: 400; color: var(--dsw-alias-label-caption); padding: 2px 8px 2px 0; }
 .dt-table td { padding: 4px 8px 4px 0; border-top: 0.5px solid var(--dsw-alias-border-l3); vertical-align: top; color: var(--dsw-alias-label-secondary); overflow-wrap: anywhere; }
 @container (max-width: 640px) {

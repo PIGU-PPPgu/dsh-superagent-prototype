@@ -116,6 +116,7 @@ const TEXT = {
   'tab.trigger': ['触发', 'Trigger'],
   'tab.eval': ['评估', 'Eval'],
   'tab.execution': ['执行', 'Execution'],
+  'tab.codex': ['Codex 观察', 'Codex Observe'],
   // Overview
   sourceError: ['{source} 来源异常', '{source} Source failing'],
   needsYouNone: ['没有待处理的工单。', 'No pending Tickets.'],

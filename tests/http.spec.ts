@@ -80,6 +80,21 @@ it('answers only a same-origin request from the panel on the loopback address', 
   expect(() => serve({}, '0.0.0.0')).toThrow('Orchestrator management requires a loopback Web server')
 })
 
+it('shows Codex observations through a read-only panel route when the bridge is configured', async () => {
+  const withoutBridge = serve({})
+  expect(await withoutBridge('GET', 'codex')).toEqual({ status: 200, body: { configured: false } })
+  const signal = new AbortController().signal
+  const refresh = async (received: AbortSignal) => {
+    expect(received).toBeInstanceOf(AbortSignal)
+    expect(received.aborted).toBe(signal.aborted)
+    return { observedAt: '2026-11-01T09:00:00.000Z', tasks: [{ taskId: 'mac', threadId: 'thread-a', state: 'unknown',
+      stale: false, statusSource: 'historyOnly' }], changes: [] }
+  }
+  const withBridge = serve({ codex: { refresh } })
+  expect(await withBridge('GET', 'codex')).toMatchObject({ status: 200,
+    body: { configured: true, observation: { tasks: [{ taskId: 'mac', state: 'unknown' }] } } })
+})
+
 it('answers a prompt save that lost a race with 409, and a settings body over 128 KiB with 400', async () => {
   const saves: unknown[] = []
   const call = serve({

@@ -31,6 +31,8 @@ Read the numbered documents in order; each builds only on the ones before it.
 - [008 Cookbook](docs/008-cookbook.md): adding a Source
 - [009 Codex read-only experiment](docs/009-codex-read-only.md): observe an explicit allowlist of existing Codex threads through a Mac-side bridge
 
+For a Mac-local history-only GUI, install dependencies and run `pnpm codex:local`; see [the Codex trial guide](docs/009-codex-read-only.md). The GUI needs no model API key and cannot determine live Codex Desktop status.
+
 ## Development
 
 `pnpm check` runs the typecheck, the tests and the build.

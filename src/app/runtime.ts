@@ -10,7 +10,8 @@ import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-skill'
 import type {} from '@deepseek-ai/dsh-subprocess'
-import { mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { CodexFileMonitor } from '../codex/file-bridge.ts'
 import { lockSync } from 'proper-lockfile'
@@ -83,6 +84,7 @@ export class Runtime extends Service implements SourceHost {
   private stopping?: Promise<void>
   private readonly sourceDeps: SourceContextDeps
   private readonly toolHost: MainToolsHost & ExecutorToolsHost
+  private readonly codexPanel?: CodexFileMonitor
   /** Non-zero while a main-Session tool is executing an Engine command, suppressing self-triggered domain event notices. */
   private quiet = 0
   constructor(ctx: Context, readonly machine: Machine, restart: () => void) {
@@ -119,9 +121,15 @@ export class Runtime extends Service implements SourceHost {
       const resources: ResourceHost = { store, pages: new TextCache(4_000_000), prompts, commands, masterId, context: ctx,
         promptVersion: id => this.sessions.promptVersion(id), mayRead: (id, revision) => this.sessions.mayRead(id, revision),
         feishuPageSize: () => feishuSettings(sources).readPageSize, sourceLink: link }
-      const codexWatchlist = process.env.DSH_SUPERAGENT_CODEX_WATCHLIST
-      const codexSnapshot = process.env.DSH_SUPERAGENT_CODEX_SNAPSHOT
+      const defaultCodexDir = join(homedir(), '.dsh', 'state', 'codex-readonly')
+      const configuredWatchlist = process.env.DSH_SUPERAGENT_CODEX_WATCHLIST
+      const configuredSnapshot = process.env.DSH_SUPERAGENT_CODEX_SNAPSHOT
+      const defaultsPresent = !configuredWatchlist && !configuredSnapshot
+        && existsSync(join(defaultCodexDir, 'watchlist.json')) && existsSync(join(defaultCodexDir, 'snapshot.json'))
+      const codexWatchlist = configuredWatchlist ?? (defaultsPresent ? join(defaultCodexDir, 'watchlist.json') : undefined)
+      const codexSnapshot = configuredSnapshot ?? (defaultsPresent ? join(defaultCodexDir, 'snapshot.json') : undefined)
       const codex = codexWatchlist && codexSnapshot ? new CodexFileMonitor(codexWatchlist, codexSnapshot) : undefined
+      this.codexPanel = codexWatchlist && codexSnapshot ? new CodexFileMonitor(codexWatchlist, codexSnapshot) : undefined
       if (!!codexWatchlist !== !!codexSnapshot) ctx.logger.warn('dsh-superagent Codex read-only adapter needs both DSH_SUPERAGENT_CODEX_WATCHLIST and DSH_SUPERAGENT_CODEX_SNAPSHOT')
       const sessions = this.sessions = new Sessions({ context: ctx, store, prompts, effects, health: board.claim('models'), masterId,
         lifetime: this.lifetime,
@@ -226,6 +234,7 @@ export class Runtime extends Service implements SourceHost {
     const runtime = this
     const { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks, setup, passes } = this
     return { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks,
+      ...(this.codexPanel ? { codex: this.codexPanel } : {}),
       get deployment() { return setup.deployment },
       get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem },
       configured: () => setup.configured(), links: () => runtime.links(), ticketEnvironment: ticket => runtime.ticketEnvironment(ticket),

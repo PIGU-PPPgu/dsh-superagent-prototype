@@ -2,6 +2,29 @@
 
 这是一层 **Codex → dsh-superagent** 的观察适配，不涉及 dot2dot。它让 DSH 的主会话通过 `orchestrator_codex_threads` 查询指定的现有 Codex 开发线程。它不把 Codex 的消息写成 DSH Trigger，也不新建 Ticket、启动 Codex turn、回复或中断线程。
 
+## Mac 上最快的只读试用（本机 GUI）
+
+本机页面不需要 DeepSeek 或 OpenAI API key。它使用本机已安装、已能读取同一批历史记录的 `codex` CLI，单次点击才启动独立的 `codex app-server`。需要 Node.js 22.19+ 或 24+ 和 pnpm；请先确认 `codex --version` 可用。首次从此分支拉取后，在仓库目录执行：
+
+```sh
+pnpm install --frozen-lockfile
+pnpm codex:local
+```
+
+终端会打印 `http://127.0.0.1:3188`（若端口被占用则先关闭占用程序，或设置 `CODEX_READONLY_PORT`）。在本机浏览器打开它：
+
+1. 点“查找本机线程”：只列最新 50 条已存储的 `cli`、`vscode`、`appServer` 来源。用线程 ID 对照 Codex 界面；列表没出现时可手动填写 ID。列表中的标题是本机展示用，不会送进 DSH 主会话。
+2. 选 1 条加入白名单，给它一个任务 ID，保存；再点“读取一次历史”。核对最新 turn、item ID 和采样时间。确认无误后再加到 5–8 条。
+3. 页面只显示历史快照，运行状态为“未知”。需要更新时再次点“读取一次历史”，不会自动轮询 Codex。移除最后一条并保存会清空本机白名单与旧快照。
+
+本机数据默认保存在 `~/.dsh/state/codex-readonly/`，目录权限要求 `0700`，两个 JSON 文件权限为 `0600`。可用绝对路径 `CODEX_READONLY_DIR` 改目录。服务只监听 `127.0.0.1`，检查 Host、Origin 和专用请求头，页面不接受密钥、不调用模型 API，也不上传线程消息。保持这个终端打开才能使用 GUI；关闭后已保存的快照仍在磁盘上。**只有在 Mac 上实测，才能确认本机 Codex CLI 能读到 Codex Desktop 所用的记录。**
+
+### 可选：在 DSH 面板查看
+
+现有的 DSH Superagent 面板现在有 **Codex 观察** 标签页。默认目录下，在本机 GUI 保存并导出后，重启运行在**同一台 Mac、同一 OS 用户**下的 dsh-superagent，标签页和主会话工具就能读到快照。自定义目录时，先把 GUI 显示的 `DSH_SUPERAGENT_CODEX_WATCHLIST` 和 `DSH_SUPERAGENT_CODEX_SNAPSHOT` 两个绝对路径传给 DSH 服务进程，再启动或重启。DSH 云端实例不会因为 Mac 页面存在就自动收到快照。
+
+DSH 本身是另一套安装配置：按[部署说明](006-deployment.md)安装本仓库插件、配置 DSH 模型提供方及 GitHub 代理账号等。按 [DSH 官方模型配置指南](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/user/guide/providers.md)，在 DSH Web 的 **Settings → Models → DeepSeek** 中输入并保存 API key；DSH 将密钥作为只写凭据管理，这个 Codex 页面不请求或保存它。**只有一个 DeepSeek API key 不足以完成 DSH 原有部署，也不能让它实时控制 Codex Desktop。**在当前试验中，DSH 主会话只能主动调用 `orchestrator_codex_threads` 读取结构化的、白名单限定的历史观察。
+
 ## 当前可运行的边界
 
 适配层包含：
@@ -10,7 +33,7 @@
 - 可注入的 `CodexReadBackend`，以及只调用 `thread/read`、`thread/turns/list` 的 `CodexAppServerBackend`；
 - 文件桥接输入 `CodexFileBackend`，以及 Mac 上可手动运行的、只读的历史快照导出器；
 - 状态归一化、两分钟采样过期判断、进度变化去重、单线程读取错误隔离；
-- 只在设置两个路径后向 DSH **主会话**注册的只读工具。没有后台轮询或自动消息。
+- 默认私有目录中已有白名单和快照，或显式设置两个路径后，向 DSH **主会话**注册的只读工具。没有后台轮询或自动消息。
 
 配置文件里的 `taskId` 是本试验的映射键，不是 DSH Ticket ID。`changes` 只表示本进程上次查询以来可见状态或进度变了；重启或编辑白名单后重新建立基线。查询时间本身不产生变化。主会话工具不返回外部线程的名字、自由文本摘要或原始错误；只返回状态、turn 与 item 的结构化字段。
 

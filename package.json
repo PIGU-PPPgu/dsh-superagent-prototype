@@ -47,6 +47,7 @@
   },
   "scripts": {
     "build": "tsdown",
+    "codex:local": "pnpm build && node scripts/codex-local.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "check": "pnpm typecheck && pnpm test && pnpm build"
