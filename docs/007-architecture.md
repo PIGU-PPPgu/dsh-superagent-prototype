@@ -313,6 +313,11 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/core/ids.ts` | `key`: ids derived from their inputs, equal for equal inputs |
 | `src/core/memory.ts` | `MemoryRepositories`: the Store's repositories in memory, in the Store's order and with its nested rollback, for domain tests |
 | `src/core/index.ts` | The core's exports |
+| `src/codex/model.ts` | The read-only Codex task mapping, snapshot, backend and observation contracts |
+| `src/codex/observer.ts` | Whitelist-bound Codex state projection, freshness checks and change deduplication |
+| `src/codex/app-server.ts` | Read-only projection of `thread/read` and `thread/turns/list` through an injected Mac-side RPC transport |
+| `src/codex/file-bridge.ts` | JSON snapshot file input and watchlist reload for the DSH main Session |
+| `src/codex/index.ts` | Public read-only Codex adapter exports |
 | `src/app/runtime.ts` | The Runtime, the composition root, with its start and stop |
 | `src/app/setup.ts` | Setup, and `setupChanged`, whether a save changes a field setup reads |
 | `src/app/passes.ts` | Passes, the pass scheduler |
@@ -408,6 +413,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/policy.spec.ts` | Source scope, the gate, the admission table, Mandate revalidation, the Policy version, settings migrations and assessment outcomes |
 | `tests/registry.spec.ts` | `SourceRegistry`: instances, validation, Policy parts, Channels and Thread context |
 | `tests/sources.spec.ts` | The Feishu and GitHub Sources on a `SourceContext`: translation, polls and read positions, the pull request rules, health |
+| `tests/codex-read.spec.ts` | Codex whitelist, read-only RPC projection, unknown live state, progress deduplication and DSH main tool integration |
 | `tests/commands.spec.ts` | CLI calls as the deployment's accounts, the Channels' answers, and repository-scoped GitHub calls |
 | `tests/feishu-read.spec.ts`, `tests/github-read.spec.ts` | Feishu and GitHub reads |
 | `tests/admission-context.spec.ts`, `tests/feishu-image.spec.ts` | The Thread window of assessments, and Feishu image reads |

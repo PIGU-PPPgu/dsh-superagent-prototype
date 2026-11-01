@@ -12,6 +12,7 @@ import type {} from '@deepseek-ai/dsh-skill'
 import type {} from '@deepseek-ai/dsh-subprocess'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { CodexFileMonitor } from '../codex/file-bridge.ts'
 import { lockSync } from 'proper-lockfile'
 import { Engine, key, reasonText, type EngineForSettings, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
 import { allowedSender, settingsPolicy } from '../policy.ts'
@@ -118,6 +119,10 @@ export class Runtime extends Service implements SourceHost {
       const resources: ResourceHost = { store, pages: new TextCache(4_000_000), prompts, commands, masterId, context: ctx,
         promptVersion: id => this.sessions.promptVersion(id), mayRead: (id, revision) => this.sessions.mayRead(id, revision),
         feishuPageSize: () => feishuSettings(sources).readPageSize, sourceLink: link }
+      const codexWatchlist = process.env.DSH_SUPERAGENT_CODEX_WATCHLIST
+      const codexSnapshot = process.env.DSH_SUPERAGENT_CODEX_SNAPSHOT
+      const codex = codexWatchlist && codexSnapshot ? new CodexFileMonitor(codexWatchlist, codexSnapshot) : undefined
+      if (!!codexWatchlist !== !!codexSnapshot) ctx.logger.warn('dsh-superagent Codex read-only adapter needs both DSH_SUPERAGENT_CODEX_WATCHLIST and DSH_SUPERAGENT_CODEX_SNAPSHOT')
       const sessions = this.sessions = new Sessions({ context: ctx, store, prompts, effects, health: board.claim('models'), masterId,
         lifetime: this.lifetime,
         closing: () => this.closing(), environment,
@@ -160,6 +165,7 @@ export class Runtime extends Service implements SourceHost {
         get deployment() { return setup.deployment }, configured: () => setup.configured(),
         get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem }, receive: trigger => passes.receive(trigger) }
       this.toolHost = { context: ctx, engine, store, prompts, sessions, settings: this.settings, assessor, resources,
+        ...(codex ? { codex } : {}),
         get github() { return runtime.context({ kind: 'github', health: ['github'] }) },
         requestPass: () => { passes.request() }, sendReplies: () => outbox.sent(),
         quietly: run => { this.quiet++; try { return run() } finally { this.quiet-- } } }
