@@ -35,6 +35,7 @@ export class CodexObserver {
   }
 
   private async collect(signal: AbortSignal): Promise<CodexObservation> {
+    if (signal.aborted) throw new Error('Codex read cancelled')
     const observedAt = this.now().toISOString()
     const ids = this.watchlist.tasks.map(task => task.threadId)
     const allowed = new Set(ids)
@@ -43,19 +44,20 @@ export class CodexObserver {
     try {
       const batch = await this.backend.readThreads(ids, signal)
       for (const value of batch.threads) {
-        const snapshot = CodexThreadSnapshotSchema.parse(value)
-        if (!allowed.has(snapshot.id)) continue // Never expose an unlisted thread.
-        if (snapshots.has(snapshot.id)) throw new Error(`Duplicate Codex snapshot: ${snapshot.id}`)
-        snapshots.set(snapshot.id, snapshot)
+        // Inspect the ID before parsing the rest: an invalid unlisted record must not poison listed tasks.
+        if (!value || typeof value !== 'object' || !('id' in value) || typeof value.id !== 'string' || !allowed.has(value.id)) continue
+        const parsed = CodexThreadSnapshotSchema.safeParse(value)
+        if (!parsed.success || snapshots.has(value.id)) { errors.set(value.id, 'Codex read unavailable'); snapshots.delete(value.id); continue }
+        if (!errors.has(value.id)) snapshots.set(value.id, parsed.data)
       }
       for (const failure of batch.failures ?? []) {
         if (!allowed.has(failure.id)) continue
-        if (snapshots.has(failure.id) || errors.has(failure.id)) throw new Error(`Conflicting Codex result: ${failure.id}`)
-        errors.set(failure.id, failure.error.slice(0, 300))
+        snapshots.delete(failure.id)
+        errors.set(failure.id, 'Codex read unavailable')
       }
-    } catch (error) {
-      const message = String(error).slice(0, 300)
-      for (const id of ids) errors.set(id, message)
+    } catch {
+      if (signal.aborted) throw new Error('Codex read cancelled')
+      for (const id of ids) errors.set(id, 'Codex read unavailable')
       snapshots.clear()
     }
     const tasks: CodexTaskView[] = this.watchlist.tasks.map(task => {
@@ -66,15 +68,18 @@ export class CodexObserver {
       if (!snapshot) return { ...base, state: 'missing', stale: true }
       const age = Date.parse(observedAt) - Date.parse(snapshot.capturedAt)
       const stale = age > this.maxAgeMs || age < -10_000
+      const { summary: _untrusted, ...latestTurn } = snapshot.latestTurn ?? { id: '', status: 'unknown' as const }
       return { ...base, state: stateOf(snapshot, Date.parse(observedAt), this.maxAgeMs), stale,
-        statusSource: snapshot.statusSource, rawStatus: snapshot.status.type, capturedAt: snapshot.capturedAt,
-        ...(snapshot.updatedAt ? { updatedAt: snapshot.updatedAt } : {}), ...(snapshot.name ? { name: snapshot.name } : {}),
-        ...(snapshot.latestTurn ? { latestTurn: snapshot.latestTurn } : {}) }
+        statusSource: snapshot.statusSource,
+        ...(snapshot.statusSource === 'sameHost' && !stale ? { rawStatus: snapshot.status.type } : {}),
+        capturedAt: snapshot.capturedAt,
+        ...(snapshot.updatedAt ? { updatedAt: snapshot.updatedAt } : {}),
+        ...(snapshot.latestTurn ? { latestTurn } : {}) }
     })
     // Poll timestamps do not create changes. A new turn, status, approval flag, or progress item does.
     const changes = tasks.flatMap(task => {
       const signature = JSON.stringify({ state: task.state, rawStatus: task.rawStatus, stale: task.stale,
-        source: task.statusSource, name: task.name, turn: task.latestTurn, error: task.error })
+        source: task.statusSource, turn: task.latestTurn, error: task.error })
       const previous = this.signatures.get(task.threadId)
       this.signatures.set(task.threadId, signature)
       return previous === signature ? [] : [{ taskId: task.taskId, threadId: task.threadId,

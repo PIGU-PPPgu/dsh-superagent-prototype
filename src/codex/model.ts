@@ -1,7 +1,9 @@
 /** Read-only Codex observations. These are deliberately separate from DSH Triggers and Tickets. */
 import { z } from 'zod'
 
-const Id = z.string().trim().min(1).max(200)
+export const CodexIdSchema = z.string().trim().min(1).max(200).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/)
+const Id = CodexIdSchema
+const Label = z.string().trim().min(1).max(200).refine(value => !/[\x00-\x1f\x7f]/.test(value), 'Control characters are not allowed')
 const Timestamp = z.iso.datetime({ offset: true })
 
 export const CodexWatchlistSchema = z.object({
@@ -9,7 +11,7 @@ export const CodexWatchlistSchema = z.object({
   tasks: z.array(z.object({
     taskId: Id,
     threadId: Id,
-    label: z.string().trim().min(1).max(200).optional(),
+    label: Label.optional(),
   }).strict()).min(1).max(32),
 }).strict().superRefine(({ tasks }, context) => {
   for (const field of ['taskId', 'threadId'] as const) {
@@ -37,8 +39,8 @@ export const CodexThreadSnapshotSchema = z.object({
     status: z.enum(['inProgress', 'completed', 'failed', 'interrupted', 'unknown']),
     /** Stable ID of the newest visible item, if the backend supplies one. */
     lastItemId: Id.optional(),
-    lastItemType: z.string().max(100).optional(),
-    /** A bounded assistant-authored progress excerpt; never interpreted as an instruction. */
+    lastItemType: Id.max(100).optional(),
+    /** Legacy bridge input. Untrusted and never exposed to DSH's main Session. */
     summary: z.string().max(500).optional(),
   }).strict().optional(),
 }).strict()
@@ -63,8 +65,8 @@ export interface CodexTaskView {
   rawStatus?: CodexThreadSnapshot['status']['type']
   capturedAt?: string
   updatedAt?: string
-  name?: string
-  latestTurn?: CodexThreadSnapshot['latestTurn']
+  /** Free-form Codex name and summary text are intentionally not returned to DSH. */
+  latestTurn?: Omit<NonNullable<CodexThreadSnapshot['latestTurn']>, 'summary'>
   error?: string
 }
 export interface CodexTaskChange { taskId: string; threadId: string; kind: 'new' | 'changed' }

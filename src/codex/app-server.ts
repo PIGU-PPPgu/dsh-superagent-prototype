@@ -14,12 +14,11 @@ const TurnsResponse = z.looseObject({ data: z.array(z.looseObject({
   id: z.string(), status: z.string(), items: z.array(z.unknown()).optional(),
 })) })
 
-function itemOf(value: unknown): { id?: string; type?: string; text?: string } | undefined {
+function itemOf(value: unknown): { id?: string; type?: string } | undefined {
   if (!value || typeof value !== 'object') return undefined
   const item = value as Record<string, unknown>
   return { ...(typeof item.id === 'string' ? { id: item.id } : {}),
-    ...(typeof item.type === 'string' ? { type: item.type } : {}),
-    ...(typeof item.text === 'string' ? { text: item.text } : {}) }
+    ...(typeof item.type === 'string' ? { type: item.type } : {}) }
 }
 
 /**
@@ -31,9 +30,13 @@ export class CodexAppServerBackend implements CodexReadBackend {
     private readonly now: () => Date = () => new Date()) {}
 
   async readThreads(threadIds: readonly string[], signal: AbortSignal): Promise<CodexReadBatch> {
+    if (signal.aborted) throw new Error('Codex read cancelled')
     const results = await Promise.all(threadIds.map(async (id): Promise<{ id: string; snapshot: CodexThreadSnapshot } | { id: string; error: string }> => {
       try { return { id, snapshot: await this.readOne(id, signal) } }
-      catch (error) { return { id, error: String(error).slice(0, 300) } }
+      catch (error) {
+        if (signal.aborted) throw new Error('Codex read cancelled')
+        return { id, error: String(error).slice(0, 300) }
+      }
     }))
     const threads: CodexThreadSnapshot[] = []
     const failures: { id: string; error: string }[] = []
@@ -52,7 +55,6 @@ export class CodexAppServerBackend implements CodexReadBackend {
     const turn = response.data[0]
     const items = (turn?.items ?? []).flatMap(value => { const item = itemOf(value); return item ? [item] : [] })
     const last = items.at(-1)
-    const assistant = items.findLast(item => item.type === 'agentMessage' && item.text)
     const statusType = read.status?.type
     const status = statusType === 'active' || statusType === 'idle' || statusType === 'notLoaded' || statusType === 'systemError'
       ? statusType : 'notLoaded'
@@ -67,7 +69,6 @@ export class CodexAppServerBackend implements CodexReadBackend {
           ? turnStatus : 'unknown',
         ...(last?.id ? { lastItemId: last.id.slice(0, 200) } : {}),
         ...(last?.type ? { lastItemType: last.type.slice(0, 100) } : {}),
-        ...(assistant?.text ? { summary: assistant.text.slice(0, 500) } : {}),
       } } : {}),
     }
   }

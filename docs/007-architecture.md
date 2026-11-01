@@ -317,6 +317,9 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/codex/observer.ts` | Whitelist-bound Codex state projection, freshness checks and change deduplication |
 | `src/codex/app-server.ts` | Read-only projection of `thread/read` and `thread/turns/list` through an injected Mac-side RPC transport |
 | `src/codex/file-bridge.ts` | JSON snapshot file input and watchlist reload for the DSH main Session |
+| `src/codex/private-file.ts` | Size-bounded, owner-only regular-file reads for the local watchlist and snapshot |
+| `src/codex/stdio.ts` | Read-only stdio JSON-RPC transport to a separately started Codex App Server |
+| `src/codex/export.ts` | One-shot history-only snapshot exporter with atomic private-file replacement |
 | `src/codex/index.ts` | Public read-only Codex adapter exports |
 | `src/app/runtime.ts` | The Runtime, the composition root, with its start and stop |
 | `src/app/setup.ts` | Setup, and `setupChanged`, whether a save changes a field setup reads |
