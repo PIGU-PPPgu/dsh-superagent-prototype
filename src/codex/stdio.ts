@@ -4,7 +4,7 @@ import { createInterface, type Interface } from 'node:readline'
 import type { CodexReadRpc } from './app-server.ts'
 
 type Pending = { resolve(value: unknown): void; reject(error: Error): void; cleanup(): void }
-const READ_METHODS = new Set(['thread/read', 'thread/turns/list', 'thread/list'])
+const READ_METHODS = new Set(['thread/read', 'thread/turns/list', 'thread/items/list', 'thread/list'])
 
 /** Starts a separate App Server, so its runtime status is never authoritative for Codex Desktop turns. */
 export class CodexStdioReadRpc implements CodexReadRpc {
@@ -52,7 +52,7 @@ export class CodexStdioReadRpc implements CodexReadRpc {
     }
   }
 
-  request(method: 'thread/read' | 'thread/turns/list' | 'thread/list', params: Record<string, unknown>, signal: AbortSignal): Promise<unknown> {
+  request(method: 'thread/read' | 'thread/turns/list' | 'thread/items/list' | 'thread/list', params: Record<string, unknown>, signal: AbortSignal): Promise<unknown> {
     if (!this.ready || !READ_METHODS.has(method)) return Promise.reject(new Error('Codex read-only RPC rejected the method'))
     return this.call(method, params, signal)
   }

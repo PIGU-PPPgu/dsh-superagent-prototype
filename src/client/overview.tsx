@@ -77,6 +77,11 @@ export function OverviewPage() {
         onChanged={reload} />)}</ul>
         : <Hint>{t('needsYouNone')}</Hint>}
     </Section>
+    {(data.codexAttention ?? 0) > 0 && <Section title={t('tab.codex')} count={data.codexAttention}>
+      <Button variant="outline" size="sm" onClick={() => navigate({ page: 'codex' })}>
+        {t('details')}
+      </Button>
+    </Section>}
     {data.problems.length > 0 && <Section title={t('problems')} count={data.problems.length}>
       <ul className="dt-list dt-cards">{data.problems.map((problem, index) => <ProblemLine key={index} problem={problem}
         onChanged={reload} />)}</ul>

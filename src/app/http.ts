@@ -4,6 +4,7 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { z } from 'zod'
 import type { CodexObservation } from '../codex/model.ts'
+import type { CodexMonitor } from './codex-monitor.ts'
 import { THREAD_FILTERS, TICKET_FILTERS, type Api, type ApiResponse, type RouteParams } from './api.ts'
 import { sourceSkills } from './context.ts'
 import type { ModelCatalog } from '@deepseek-ai/dsh-api-session-controller/types'
@@ -31,6 +32,7 @@ import { executorLoad, ticketDetail, ticketList } from './views/tickets.ts'
 
 export interface HttpHost {
   readonly codex?: { refresh(signal: AbortSignal): Promise<CodexObservation> }
+  readonly codexMonitor: Pick<CodexMonitor, 'view' | 'setEnabled' | 'acknowledge'>
   readonly store: Store
   /** Feishu message links resolved since startup, used by search to match AppLink URLs. */
   readonly sourceLinks: Pick<TextCache, 'entries'>
@@ -155,11 +157,27 @@ function routes(runtime: HttpHost): Routes {
   const ticket = (id: string) => { if (!store.tickets.get(id)) throw new RouteError(404, 'Ticket not found'); return id }
   const promptBody = (input: { body: (maxBytes?: number) => Promise<unknown> }) => input.body(4 * runtime.machine.promptMaxChars.get() + 4096)
   return {
-    'GET codex': async () => runtime.codex ? { configured: true,
-      observation: await runtime.codex.refresh(new AbortController().signal) } : { configured: false },
+    'GET codex': async ({ query }) => {
+      const monitor = runtime.codexMonitor.view(offset.parse(query.offset), limit(50, 100).parse(query.limit))
+      return monitor.enabled || !runtime.codex ? { configured: !!runtime.codex, monitor }
+        : { configured: true, monitor, observation: await runtime.codex.refresh(new AbortController().signal) }
+    },
+    'POST codex/monitor': async ({ body }) =>
+      runtime.codexMonitor.setEnabled(z.object({ enabled: z.boolean() }).strict().parse(await body()).enabled),
+    'POST codex/attention/:id/ack': async ({ params, body }) => {
+      const seen = z.object({ itemId: z.string().min(1).max(200), at: z.iso.datetime({ offset: true }) }).strict()
+        .parse(await body())
+      return runtime.codexMonitor.acknowledge(params.id, seen.itemId, seen.at)
+    },
     'GET state': () => stateView(runtime),
-    'GET overview': () => overview(views(runtime), runtime.health, policyVersion(store.settings()),
-      executorLoad(store, runtime.executor.activeCount()), runtime.setupProblem ?? runtime.feishuProblem),
+    'GET overview': () => {
+      const monitor = runtime.codexMonitor.view(0, 0)
+      const page = overview(views(runtime), runtime.health, policyVersion(store.settings()),
+        executorLoad(store, runtime.executor.activeCount()), runtime.setupProblem ?? runtime.feishuProblem)
+      return { ...page, problems: monitor.enabled ? page.problems.filter(problem =>
+        problem.kind !== 'no-source' && problem.kind !== 'no-allowed') : page.problems,
+        codexAttention: monitor.attentionTotal }
+    },
     'GET search': ({ query }) => search(views(runtime), query.q ?? '', runtime.sourceLinks),
     'GET sources': () => sourcesStatus(views(runtime), runtime.health, setupState(runtime)),
     'GET settings': () => settingsView(store, runtime.sources, runtime.health, setupState(runtime), runtime.machine.stateDir),

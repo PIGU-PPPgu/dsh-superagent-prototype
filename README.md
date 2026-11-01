@@ -8,6 +8,8 @@ dsh-superagent is a proactive coding agent for one GitHub repository, packaged a
 
 It is also a way of working with an agent: **take as little human attention as possible, and give as much value as possible.** An agent that can act for a whole team can also waste a whole team's attention, so it acts only when asked or when a rule the team wrote allows it, and speaks only when someone must act or can use a result. [docs/000-philosophy.md](docs/000-philosophy.md) explains the principle and what it asks of the operator.
 
+On a Mac, an optional Codex monitor observes all locally indexed Codex conversations, asks the configured DSH model to assess new user and assistant messages, and shows attention in the Superagent panel. It reads stored history and never controls an existing Codex thread.
+
 ## Setup
 
 Setup has many steps, so an agent does it with you. Ask your coding agent:
@@ -31,6 +33,7 @@ Read the numbered documents in order; each builds only on the ones before it.
 - [008 Cookbook](docs/008-cookbook.md): adding a Source
 - [009 Codex read-only experiment](docs/009-codex-read-only.md): observe an explicit allowlist of existing Codex threads through a Mac-side bridge
 - [010 Codex cloud validation](docs/010-codex-cloud-validation.md): a real cloud Codex CLI thread discovered and exported through the local GUI, with the model-network blocker recorded
+- [011 Codex monitor](docs/011-codex-monitor.md): automatic observation of locally stored Codex conversations and panel attention
 
 For a Mac-local history-only GUI, install dependencies and run `pnpm codex:local`; see [the Codex trial guide](docs/009-codex-read-only.md). The GUI needs no model API key and cannot determine live Codex Desktop status.
 

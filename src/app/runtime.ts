@@ -14,6 +14,7 @@ import { existsSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { CodexFileMonitor } from '../codex/file-bridge.ts'
+import { CodexMonitor } from './codex-monitor.ts'
 import { lockSync } from 'proper-lockfile'
 import { Engine, key, reasonText, type EngineForSettings, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
 import { allowedSender, settingsPolicy } from '../policy.ts'
@@ -85,6 +86,7 @@ export class Runtime extends Service implements SourceHost {
   private readonly sourceDeps: SourceContextDeps
   private readonly toolHost: MainToolsHost & ExecutorToolsHost
   private readonly codexPanel?: CodexFileMonitor
+  private readonly codexMonitor: CodexMonitor
   /** Non-zero while a main-Session tool is executing an Engine command, suppressing self-triggered domain event notices. */
   private quiet = 0
   constructor(ctx: Context, readonly machine: Machine, restart: () => void) {
@@ -99,6 +101,7 @@ export class Runtime extends Service implements SourceHost {
     try {
       const report = (error: unknown) => { ctx.logger.warn('dsh-superagent: %s', String(error)) }
       const store = opened = this.store = new Store(join(machine.stateDir, 'orchestrator.sqlite'), report)
+      this.codexMonitor = new CodexMonitor({ store, context: ctx })
       const setup = this.setup = new Setup({ context: ctx, machine, lifetime: this.lifetime, restart })
       const deployed = () => setup.configured()
         ? environmentOf({ deployment: setup.deployment, sources: this.sources, settings: store.settings() }) : undefined
@@ -228,6 +231,7 @@ export class Runtime extends Service implements SourceHost {
     this.executor.resume()
     this.passes.start()
     this.effects.start()
+    this.codexMonitor.start()
     this.runtimeHealth.set({ state: 'ready', detail: 'Orchestrator is ready', at: now() })
   }
   private httpHost(): HttpHost {
@@ -235,6 +239,7 @@ export class Runtime extends Service implements SourceHost {
     const { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks, setup, passes } = this
     return { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks,
       ...(this.codexPanel ? { codex: this.codexPanel } : {}),
+      codexMonitor: this.codexMonitor,
       get deployment() { return setup.deployment },
       get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem },
       configured: () => setup.configured(), links: () => runtime.links(), ticketEnvironment: ticket => runtime.ticketEnvironment(ticket),
@@ -245,6 +250,7 @@ export class Runtime extends Service implements SourceHost {
   private async shutdown(): Promise<void> {
     this.closingFlag = true; const passes = this.passes.stop(); this.stopped.abort()
     try {
+      await this.codexMonitor.stop()
       this.assessor.stop()
       const ids = [this.masterId, ...this.store.tickets.list().map(ticket => workerSessionId(ticket.id))]
       const agents = ids.map(id => this.ctx.agents.get(id as SessionId)).filter((agent): agent is Agent => agent !== undefined)

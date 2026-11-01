@@ -1,40 +1,74 @@
-/** DSH panel view of the separately configured, history-only Codex file bridge. */
+/** Superagent panel for automatic, history-based observation of local Codex conversations. */
+import { useState } from 'react'
 import { usePoll } from './api.ts'
 import { Button } from './controls.tsx'
-import { usePanel, usePanelData } from './provider.tsx'
+import { useAction, usePanel, usePanelData } from './provider.tsx'
 
-const stateName: Record<string, string> = { unknown: '未知', missing: '没有记录', unavailable: '读取失败',
-  running: '运行中', waitingForApproval: '等待批准', idle: '空闲', systemError: '系统错误' }
+const PAGE_SIZE = 50
 
 export function CodexPage() {
   const { call, t } = usePanel()
   const { restarts } = usePanelData()
   const chinese = t('tab.codex') === 'Codex 观察'
-  const { data, error, reload } = usePoll(() => call('GET codex'), [call, restarts], 10_000)
-  const tasks = data?.observation?.tasks ?? []
+  const [offset, setOffset] = useState(0)
+  const { data, error, reload } = usePoll(() => call('GET codex', { query: { offset, limit: PAGE_SIZE } }),
+    [call, restarts, offset], 10_000)
+  const toggle = useAction((enabled: boolean) => call('POST codex/monitor', { body: { enabled } }), { reload })
+  const acknowledge = useAction((id: string, itemId: string, at: string) =>
+    call('POST codex/attention/:id/ack', { id, body: { itemId, at } }), { reload })
+  const monitor = data?.monitor
+
   return <div className="dt-codex">
-    <div className="dt-row-buttons"><h2>{t('tab.codex')}</h2><Button variant="outline" size="sm" onClick={() => { void reload() }}>
-      {chinese ? '刷新' : 'Refresh'}</Button></div>
-    <p className="dt-hint">{chinese
-      ? '这里读取本机桥接的白名单与历史快照。独立的 Codex App Server 无法证明 Codex Desktop 此刻的运行状态；不会给已有线程发消息。'
-      : 'This reads the local bridge allowlist and stored-history snapshot. A separate Codex App Server cannot prove live Codex Desktop status; it never sends messages to existing threads.'}</p>
+    <div className="dt-row-buttons"><h2>{t('tab.codex')}</h2>
+      <Button variant={monitor?.enabled ? 'outline' : undefined} size="sm" disabled={toggle.busy}
+        onClick={() => { void toggle.run(!monitor?.enabled) }}>
+        {monitor?.enabled ? (chinese ? '暂停监控' : 'Pause monitoring') : (chinese ? '开始监控' : 'Start monitoring')}
+      </Button>
+    </div>
     {error && <p className="dt-error" role="alert">{error.message}</p>}
-    {data && !data.configured && <p className="dt-hint">{chinese
-      ? '尚未配置本机桥。先在 Mac 的仓库中运行 pnpm codex:local，在本机页面选线程并导出，然后重启 DSH。自定义数据目录时需设置页面给出的两个环境变量。'
-      : 'No local bridge is configured. Run pnpm codex:local in the repository on your Mac, select threads and export, then restart DSH. A custom data directory also needs the two environment variables shown there.'}</p>}
-    {data?.configured && !tasks.length && <p className="dt-hint">{chinese ? '白名单中没有可显示的线程。' : 'No allowlisted threads to display.'}</p>}
-    {!!tasks.length && <div className="dt-table-wrap"><table className="dt-table">
-      <thead><tr><th>{chinese ? '任务' : 'Task'}</th><th>{chinese ? '线程 ID' : 'Thread ID'}</th>
-        <th>{chinese ? '状态' : 'State'}</th><th>{chinese ? '已存储进度' : 'Stored progress'}</th>
-        <th>{chinese ? '采样时间' : 'Captured at'}</th></tr></thead>
-      <tbody>{tasks.map(task => <tr key={task.taskId}><td>{task.label || task.taskId}</td><td className="dt-mono">{task.threadId}</td>
-        <td>{task.statusSource === 'historyOnly' ? (chinese ? '未知（历史）' : 'Unknown (history)')
-          : chinese ? stateName[task.state] ?? task.state : task.state}</td>
-        <td className="dt-mono">{task.latestTurn ? `${task.latestTurn.id} / ${task.latestTurn.lastItemId ?? '—'}` : '—'}</td>
-        <td>{task.capturedAt ?? '—'}</td></tr>)}</tbody>
-    </table></div>}
-    <p className="dt-hint">{chinese
-      ? '本机 GUI 无需模型 API key。DSH 主会话要调用 orchestrator_codex_threads，请先在 DSH 自身配置模型 API；当前只读试验没有控制接口。'
-      : 'The local GUI needs no model API key. To use orchestrator_codex_threads in the DSH main Session, configure a model API in DSH itself. This read-only trial has no control API.'}</p>
+    {monitor?.error && <p className="dt-error" role="alert">{monitor.error}</p>}
+    {monitor?.enabled && <p className="dt-hint">{chinese
+      ? `已发现 ${monitor.total} 条对话；上次扫描 ${monitor.scannedAt ?? '尚未完成'}。数据来自已存储历史，不能证明 Desktop 的实时运行状态。`
+      : `Found ${monitor.total} conversations; last scan ${monitor.scannedAt ?? 'pending'}. Stored history does not prove live Desktop status.`}</p>}
+    {!monitor?.enabled && <p className="dt-hint">{chinese
+      ? '启用后约每 30 秒扫描本机 Codex 历史；首次建立基线，之后把变化的用户与助手消息交给当前 DSH 模型判断。'
+      : 'Scan local Codex history about every 30 seconds. After the first baseline, changed user and assistant messages go to the current DSH model.'}</p>}
+
+    {!!monitor?.attentionTotal && <section>
+      <h3>{chinese ? '需要你处理' : 'Needs your attention'} · {monitor.attentionTotal}</h3>
+      <ul className="dt-list dt-cards">{monitor.attention.map(thread => <li className="dt-row dt-att" key={thread.id}>
+        <div className="dt-row-main">
+          <strong>{thread.title}</strong>
+          <small className="dt-mono">{thread.id}</small>
+          <p>{thread.attention?.decision.reason}</p>
+          <p>{thread.attention?.decision.action}</p>
+          <div className="dt-row-buttons"><Button variant="outline" size="sm" disabled={acknowledge.busy}
+            onClick={() => { if (thread.attention) void acknowledge.run(thread.id, thread.attention.itemId,
+              thread.attention.at) }}>{chinese ? '关闭提醒' : 'Dismiss'}</Button></div>
+        </div>
+      </li>)}</ul>
+    </section>}
+
+    {!!monitor?.total && <section>
+      <h3>{chinese ? '全部对话' : 'All conversations'} · {monitor.total}</h3>
+      <div className="dt-table-wrap"><table className="dt-table">
+        <thead><tr><th>{chinese ? '对话' : 'Conversation'}</th><th>{chinese ? '来源' : 'Source'}</th>
+          <th>{chinese ? '最近更新' : 'Updated'}</th><th>{chinese ? '观察' : 'Observation'}</th></tr></thead>
+        <tbody>{monitor.threads.map(thread => <tr key={thread.id}>
+          <td><strong>{thread.title}</strong><br /><small className="dt-mono">{thread.id}</small>
+            {thread.parentThreadId && <><br /><small>{chinese ? '父线程' : 'Parent'}: {thread.parentThreadId}</small></>}</td>
+          <td>{thread.sourceKind}{thread.archived ? (chinese ? ' · 已归档' : ' · Archived') : ''}</td>
+          <td>{thread.updatedAt ?? '—'}</td>
+          <td>{thread.error ? (chinese ? '监控异常' : 'Monitor error') : thread.attention?.decision.needsAttention
+            && !thread.attention.acknowledgedAt ? (chinese ? '需处理' : 'Needs attention') : '—'}</td>
+        </tr>)}</tbody>
+      </table></div>
+      <div className="dt-row-buttons">
+        {offset > 0 && <Button variant="outline" size="sm" onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}>
+          {chinese ? '上一页' : 'Previous'}</Button>}
+        {monitor.nextOffset !== undefined && <Button variant="outline" size="sm" onClick={() => setOffset(monitor.nextOffset!)}>
+          {chinese ? '下一页' : 'Next'}</Button>}
+      </div>
+    </section>}
   </div>
 }

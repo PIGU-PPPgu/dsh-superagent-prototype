@@ -13,7 +13,10 @@ type Headers = Record<string, string | undefined>
 function serve(runtime: Partial<Record<keyof HttpHost, unknown>>, host = '127.0.0.1') {
   let handler: Handler = async () => {}
   const ctx = { webServer: { host, port: 3082, register: (route: { handler: Handler }) => { handler = route.handler; return () => {} } } }
-  registerHttp(ctx as never, { ready: Promise.resolve(), ...runtime } as unknown as HttpHost)
+  const emptyMonitor = { enabled: false, total: 0, attentionTotal: 0, attention: [], threads: [] }
+  registerHttp(ctx as never, { ready: Promise.resolve(),
+    codexMonitor: { view: () => emptyMonitor, setEnabled: () => emptyMonitor, acknowledge: () => emptyMonitor },
+    ...runtime } as unknown as HttpHost)
   return async (method: string, path: string, body?: unknown, headers: Headers = {}) => {
     let status = 0, text = ''
     const chunks = body === undefined ? [] : [Buffer.from(typeof body === 'string' ? body : JSON.stringify(body))]
@@ -82,7 +85,9 @@ it('answers only a same-origin request from the panel on the loopback address', 
 
 it('shows Codex observations through a read-only panel route when the bridge is configured', async () => {
   const withoutBridge = serve({})
-  expect(await withoutBridge('GET', 'codex')).toEqual({ status: 200, body: { configured: false } })
+  expect(await withoutBridge('GET', 'codex')).toEqual({ status: 200, body: {
+    configured: false, monitor: { enabled: false, total: 0, attentionTotal: 0, attention: [], threads: [] },
+  } })
   const signal = new AbortController().signal
   const refresh = async (received: AbortSignal) => {
     expect(received).toBeInstanceOf(AbortSignal)
@@ -93,6 +98,20 @@ it('shows Codex observations through a read-only panel route when the bridge is 
   const withBridge = serve({ codex: { refresh } })
   expect(await withBridge('GET', 'codex')).toMatchObject({ status: 200,
     body: { configured: true, observation: { tasks: [{ taskId: 'mac', state: 'unknown' }] } } })
+  const actions: unknown[] = []
+  const withMonitor = serve({ codexMonitor: {
+    view: () => ({ enabled: false, total: 1, attentionTotal: 1, attention: [], threads: [] }),
+    setEnabled: (enabled: boolean) => { actions.push(enabled); return { enabled, total: 1, attentionTotal: 1,
+      attention: [], threads: [] } },
+    acknowledge: (id: string, itemId: string, at: string) => { actions.push([id, itemId, at]); return { enabled: true, total: 1, attentionTotal: 0,
+      attention: [], threads: [] } },
+  } })
+  expect(await withMonitor('POST', 'codex/monitor', { enabled: true })).toMatchObject({ status: 200,
+    body: { enabled: true } })
+  expect(await withMonitor('POST', 'codex/attention/thread-a/ack',
+    { itemId: 'item-a', at: '2026-11-01T12:00:00Z' })).toMatchObject({ status: 200,
+    body: { attentionTotal: 0 } })
+  expect(actions).toEqual([true, ['thread-a', 'item-a', '2026-11-01T12:00:00Z']])
 })
 
 it('answers a prompt save that lost a race with 409, and a settings body over 128 KiB with 400', async () => {

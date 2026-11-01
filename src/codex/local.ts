@@ -109,7 +109,7 @@ export async function startCodexLocalServer(options: CodexLocalOptions = {}): Pr
   const watchlistPath = join(directory, 'watchlist.json')
   const snapshotPath = join(directory, 'snapshot.json')
   const monitor = new CodexFileMonitor(watchlistPath, snapshotPath)
-  const connect = options.connect ?? (() => CodexStdioReadRpc.connect())
+  const connect = options.connect ?? (() => CodexStdioReadRpc.connect({ timeoutMs: 30_000 }))
   let mutating = false
   const state = async (): Promise<{ tasks: { taskId: string; threadId: string; label?: string }[]; observation?: CodexObservation;
     watchlistPath: string; snapshotPath: string; snapshotReady: boolean }> => {

@@ -6,6 +6,7 @@ import { afterEach, beforeEach, expect, vi } from 'vitest'
 import { z } from 'zod'
 import type { ConfigForm, ConfigFormSnapshot } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { Api, ApiResponse, RouteParams } from '../../src/app/api.ts'
+import type { CodexMonitorView } from '../../src/app/codex-monitor.ts'
 import { SKILL_NAME, SKILL_PREFIX, TEAM_SECTIONS, builtInBase, builtInPart, builtInParts, composePrompt, composeSkill, defaultPrompts,
   environmentSection, policySection, promptParts } from '../../src/app/prompts.ts'
 import type { DroppedReply, HistoryView, Problem, PromptsView, SetupView, SourceStatusRow, SourceView, StateView, ThreadPageView,
@@ -85,6 +86,7 @@ export const MACHINE = { stateDir: '/srv/dsh-superagent', promptMaxChars: 100000
 
 type Settings = ReturnType<typeof SettingsSchema.parse>
 export interface PanelServer {
+  codex: CodexMonitorView
   joined?: Record<string, string>; joining?: Record<string, string>
   joinError?: string
   settings: Settings; revisions: Record<string, number>
@@ -180,6 +182,7 @@ const overviewView = (): ApiResponse<'GET overview'> => {
   const { problem, feishuProblem } = server.setup
   const setup = problem ?? feishuProblem
   return {
+    codexAttention: server.codex.attentionTotal,
     problems: [...setup ? [{ kind: 'setup' as const, ...setup }] : [],
       ...KINDS.some(kind => server.settings.sources[kind.kind]?.enabled !== false) ? [] : [{ kind: 'no-source' as const }],
       ...feishuProblem || server.settings.sources.feishu?.enabled === false ? [] : [{ kind: 'source-error' as const, source: { id: 'feishu',
@@ -247,6 +250,7 @@ function initial(): PanelServer {
     en: 'Feishu message' } }
   const defaults = { revision: 0, previousRevision: null, savedAt: '', source: 'defaults' }
   return {
+    codex: { enabled: false, total: 0, attentionTotal: 0, attention: [], threads: [] },
     health: {}, down: false, pending: 0, opened: [], requests: [], misuse: [], queued: new Set(), dropped: [], failing: [],
     setup: { machine: MACHINE, problem: null, feishuProblem: null,
       accounts: { repository: 'acme/widgets', agent: 'agent-bot', feishu: { appId: 'cli_bot', brand: 'feishu', botId: 'ou_bot',
@@ -291,7 +295,21 @@ const ticketOf = (id: string) =>
 const SourceSave = z.object({ enabled: z.boolean(), config: z.unknown() })
 
 const ROUTES: { [K in keyof Api]: Route<K> } = {
-  'GET codex': { answer: () => ({ configured: false }) },
+  'GET codex': { query: ['offset', 'limit'], answer: () => ({ configured: false, monitor: server.codex }) },
+  'POST codex/monitor': { body: true, answer: ({ body }) => {
+    server.codex = { ...server.codex, enabled: body.enabled }
+    return server.codex
+  } },
+  'POST codex/attention/:id/ack': { body: true, answer: ({ params, body }) => {
+    const matches = (row: CodexMonitorView['attention'][number]) => row.id === params.id
+      && row.attention?.itemId === body.itemId && row.attention.at === body.at
+    if (!server.codex.attention.some(matches)) return server.codex
+    server.codex = { ...server.codex, attention: server.codex.attention.filter(row => !matches(row)),
+      attentionTotal: server.codex.attentionTotal - 1,
+      threads: server.codex.threads.map(row => matches(row) && row.attention
+        ? { ...row, attention: { ...row.attention, acknowledgedAt: '2026-11-01T12:00:00Z' } } : row) }
+    return server.codex
+  } },
   'GET state': { answer: stateView },
   'GET overview': { answer: overviewView },
   'GET search': { query: ['q'], answer: async ({ query }) => {

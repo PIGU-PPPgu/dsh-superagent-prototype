@@ -1,6 +1,7 @@
 /** Type-only management API contract between the web panel and host routes, imported by the panel without bundling host code. */
 import type { ModelCatalog } from '@deepseek-ai/dsh-api-session-controller/types'
 import type { CodexObservation } from '../codex/model.ts'
+import type { CodexMonitorView } from './codex-monitor.ts'
 import type { PromptConfig, Prompts } from './prompts.ts'
 import type { PromptsView, StateView, TicketPageView } from './http.ts'
 import type { HistoryView } from './settings-history.ts'
@@ -19,9 +20,11 @@ interface Paged { offset?: number; limit?: number }
 type Delivery = 'injected' | 'pending'
 
 export interface Api {
-  'GET codex': { response: { configured: boolean; observation?: CodexObservation } }
+  'GET codex': { query?: Paged; response: { configured: boolean; observation?: CodexObservation; monitor: CodexMonitorView } }
+  'POST codex/monitor': { body: { enabled: boolean }; response: CodexMonitorView }
+  'POST codex/attention/:id/ack': { body: { itemId: string; at: string }; response: CodexMonitorView }
   'GET state': { response: StateView }
-  'GET overview': { response: OverviewView }
+  'GET overview': { response: OverviewView & { codexAttention?: number } }
   'GET search': { query: { q: string }; response: SearchView }
   'GET sources': { response: SourceStatusView[] }
   'GET settings': { response: SettingsView }

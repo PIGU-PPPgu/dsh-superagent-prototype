@@ -321,10 +321,13 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/codex/stdio.ts` | Read-only stdio JSON-RPC transport to a separately started Codex App Server |
 | `src/codex/export.ts` | One-shot history-only snapshot exporter with atomic private-file replacement |
 | `src/codex/discovery.ts` | Bounded local-only discovery of stored Codex thread IDs for the operator's allowlist |
+| `src/codex/monitor-read.ts` | Read-only pagination of all locally indexed Codex threads and bounded new user/agent messages |
+| `src/codex/triage.ts` | Bounded model input and strict attention decision parsing for changed Codex messages |
 | `src/codex/local.ts` | Loopback-only dashboard server and private local allowlist editor |
 | `src/codex/local-ui.ts` | Self-contained local dashboard HTML, CSS and browser code |
 | `src/codex/index.ts` | Public read-only Codex adapter exports |
 | `src/app/runtime.ts` | The Runtime, the composition root, with its start and stop |
+| `src/app/codex-monitor.ts` | Automatic Codex history scan, model triage, private persistence and panel attention |
 | `src/app/setup.ts` | Setup, and `setupChanged`, whether a save changes a field setup reads |
 | `src/app/passes.ts` | Passes, the pass scheduler |
 | `src/app/outbox.ts` | The Outbox: the Engine's `Outbox` port, the receipts and the `reply` effects that send them |
@@ -422,6 +425,9 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/sources.spec.ts` | The Feishu and GitHub Sources on a `SourceContext`: translation, polls and read positions, the pull request rules, health |
 | `tests/codex-read.spec.ts` | Codex whitelist, read-only RPC projection, unknown live state, progress deduplication and DSH main tool integration |
 | `tests/codex-local.spec.ts` | Mac-local loopback dashboard, discovery, private file and allowlist boundaries |
+| `tests/codex-monitor-read.spec.ts` | All-source and archived discovery, bounded incremental Codex message reads |
+| `tests/codex-triage.spec.ts` | Bounded untrusted model input and strict attention output |
+| `tests/codex-monitor.spec.ts` | Baseline, changed-message triage, acknowledgement, restart and failed-read retry |
 | `tests/commands.spec.ts` | CLI calls as the deployment's accounts, the Channels' answers, and repository-scoped GitHub calls |
 | `tests/feishu-read.spec.ts`, `tests/github-read.spec.ts` | Feishu and GitHub reads |
 | `tests/admission-context.spec.ts`, `tests/feishu-image.spec.ts` | The Thread window of assessments, and Feishu image reads |
