@@ -63,7 +63,8 @@ it('provides a loopback GUI, discovers stored IDs, and exports only allowlisted 
     { id: 'other-thread', name: '<script>text</script>' },
   ])
   expect(JSON.stringify(candidates.value)).not.toContain('private prompt')
-  expect(rpc.calls[0]).toMatchObject({ method: 'thread/list', params: { limit: 50 } })
+  expect(rpc.calls[0]).toMatchObject({ method: 'thread/list', params: { limit: 50,
+    sourceKinds: ['cli', 'vscode', 'exec', 'appServer'] } })
 
   const list = { version: 1, tasks: [{ taskId: 'mac', threadId: 'thread-a', label: 'Mac task' }] }
   expect((await api('watchlist', 'POST', list)).status).toBe(200)

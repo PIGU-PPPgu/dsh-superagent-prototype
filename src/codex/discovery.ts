@@ -17,7 +17,7 @@ export interface CodexDiscoveryRpc {
 /** Read one bounded page. Names and paths stay in the loopback GUI; they never enter a DSH tool response. */
 export async function discoverCodexThreads(rpc: CodexDiscoveryRpc, signal: AbortSignal): Promise<CodexCandidate[]> {
   const response = ListResponse.parse(await rpc.request('thread/list', {
-    limit: 50, sortKey: 'updated_at', sortDirection: 'desc', sourceKinds: ['cli', 'vscode', 'appServer'],
+    limit: 50, sortKey: 'updated_at', sortDirection: 'desc', sourceKinds: ['cli', 'vscode', 'exec', 'appServer'],
   }, signal))
   const seen = new Set<string>()
   return response.data.flatMap(value => {

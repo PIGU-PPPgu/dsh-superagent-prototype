@@ -30,6 +30,7 @@ Read the numbered documents in order; each builds only on the ones before it.
 - [007 Architecture](docs/007-architecture.md)
 - [008 Cookbook](docs/008-cookbook.md): adding a Source
 - [009 Codex read-only experiment](docs/009-codex-read-only.md): observe an explicit allowlist of existing Codex threads through a Mac-side bridge
+- [010 Codex cloud validation](docs/010-codex-cloud-validation.md): a real cloud Codex CLI thread discovered and exported through the local GUI, with the model-network blocker recorded
 
 For a Mac-local history-only GUI, install dependencies and run `pnpm codex:local`; see [the Codex trial guide](docs/009-codex-read-only.md). The GUI needs no model API key and cannot determine live Codex Desktop status.
 
