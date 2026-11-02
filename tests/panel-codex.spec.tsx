@@ -14,6 +14,33 @@ it('enables automatic observation from the Codex panel', async () => {
   expect(text()).toContain('暂停监控')
 })
 
+it('enables Codex auto handoff only after an explicit panel action', async () => {
+  await mount()
+  await click(tab(zh['tab.codex']))
+  expect(text()).toContain('开启自动接单')
+  expect(server.requests.some(request => request.path === 'codex/auto-handoff')).toBe(false)
+  await click('开启自动接单')
+  expect(server.requests).toContainEqual({ path: 'codex/auto-handoff', method: 'POST', body: { enabled: true } })
+  expect(text()).toContain('关闭自动接单')
+  await click('关闭自动接单')
+  expect(server.requests).toContainEqual({ path: 'codex/auto-handoff', method: 'POST', body: { enabled: false } })
+})
+
+it('links a Codex handoff to its ticket and shows a failed handoff', async () => {
+  server.codex = { enabled: true, autoHandoffEnabled: true, total: 2, recentTotal: 2,
+    attentionTotal: 0, attention: [], threads: [
+      { id: 'thread-a', title: '发布任务', sourceKind: 'vscode', archived: false, present: true, handoffTicketId: 't1' },
+      { id: 'thread-b', title: '构建任务', sourceKind: 'cli', archived: false, present: true, handoffError: 'Codex handoff unavailable' },
+    ] }
+  await mount()
+  await click(tab(zh['tab.codex']))
+  await click('查看工单')
+  expect(text()).toContain('修复回归')
+  await click(tab(zh['tab.codex']))
+  expect(text()).toContain('自动接单暂不可用')
+  expect(text()).not.toContain('Codex handoff unavailable')
+})
+
 it('surfaces an actionable Codex conversation on the overview and lets the person acknowledge it', async () => {
   const attention = { decision: { needsAttention: true as const, kind: 'review' as const,
     reason: '结果待审阅', action: '检查发布结果' }, at: '2026-11-01T12:00:00Z', itemId: 'item-new' }

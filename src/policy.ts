@@ -175,7 +175,8 @@ export function policyEffects(tickets: readonly Ticket[], old: Settings, now: Se
   return effects
 }
 /** Build the active Policy for gating incoming Triggers and revalidating existing Ticket Mandates. */
-export function settingsPolicy(settings: Settings, sources: SourceScope): Policy {
+export function settingsPolicy(settings: Settings, sources: SourceScope,
+  codexAutoAuthorized?: (trigger: Trigger) => boolean): Policy {
   const version = policyVersion(settings)
   const mode = settings.eval.mode
   /** Gate non-human triggers: only listed bots (as inferred candidates) and senderless system/CI events may pass; other bots are rejected. */
@@ -200,6 +201,12 @@ export function settingsPolicy(settings: Settings, sources: SourceScope): Policy
   return {
     version, paused: settings.paused, evalTimeoutMs: settings.eval.timeoutSeconds * 1000,
     gate(trigger: Trigger, thread, tickets) {
+      if (trigger.source === 'codex' && trigger.actor.source === 'codex'
+        && trigger.actor.id === 'local-codex-monitor' && trigger.addressed === 'direct'
+        && !trigger.channel && codexAutoAuthorized?.(trigger)) {
+        return { admissible: true, strength: 'explicit', basis: { source: 'codex', scope: trigger.meta,
+          via: 'codex-auto', addressed: 'direct' } }
+      }
       if (!trigger.human) return machineGate(trigger)
       const allowed = allowedSender(settings, trigger.actor, trigger.meta)
       const scope = listened(sources, trigger.source, trigger.meta)
@@ -224,6 +231,8 @@ export function settingsPolicy(settings: Settings, sources: SourceScope): Policy
     revalidate(mandate: Mandate) {
       // Revalidation rules follow docs/002 (Eval path; Resume revalidates).
       const { basis } = mandate
+      if (basis.via === 'codex-auto') return mandate.actor.source === 'codex'
+        && mandate.actor.id === 'local-codex-monitor' && basis.source === 'codex'
       const { source } = basis
       const current = source && basis.scope ? listened(sources, source, basis.scope) : undefined
       if (current && !current.listened) return false

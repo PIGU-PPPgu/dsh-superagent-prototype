@@ -242,6 +242,42 @@ it('relays an explicit member mention as a candidate and creates the ticket, ack
   expect(await route({ kind: 'accept', trigger_id: trigger.id, title: 'again', worktree_name: worktreeName, acknowledgement: 'x' })).toMatchObject({ ticket: { ticket_id: ticket.id } })
 })
 
+it('accepts a Codex failure once, routes later evidence to its ticket, and isolates an unbound repository', async () => {
+  const accept = (runtime as unknown as { acceptCodexFailure: (candidate: {
+    threadId: string; itemId: string; title: string; summary: string; evidence: string; repository?: string;
+    messages: { role: 'user' | 'assistant'; text: string }[] }, signal: AbortSignal) => Promise<string> })
+    .acceptCodexFailure.bind(runtime)
+  const candidate = { threadId: 'codex-thread-a', itemId: 'assistant-1', title: 'Build failed',
+    summary: 'Build failed during verification', evidence: 'The build failed', repository: 'acme/widgets',
+    messages: [{ role: 'assistant' as const, text: 'The build failed' }] }
+  const ticketId = await accept(candidate, new AbortController().signal)
+  expect(await accept(candidate, new AbortController().signal)).toBe(ticketId)
+  const ticket = runtime.store.tickets.get(ticketId)!
+  expect(runtime.store.tickets.list()).toHaveLength(1)
+  expect(ticket.mandate.basis.via).toBe('codex-auto')
+  expect(ticket.channels).toEqual([])
+  expect(runtime.store.triggers.get(ticket.origin.triggerId)?.meta).toMatchObject({
+    githubBinding: 'default', workspaceMode: 'execute', repository: 'acme/widgets' })
+  expect(Object.fromEntries(runtime.ticketEnvironment(ticket).map(row => [row.key, row.value])))
+    .toMatchObject({ DSH_SUPERAGENT_GITHUB_REPOSITORY: 'acme/widgets' })
+
+  const continued = await accept({ ...candidate, itemId: 'assistant-2', evidence: 'The retry failed',
+    messages: [{ role: 'assistant', text: 'The retry failed' }] }, new AbortController().signal)
+  expect(continued).toBe(ticketId)
+  expect(runtime.store.tickets.list()).toHaveLength(1)
+  expect(runtime.store.tickets.get(ticketId)?.inputs.filter(input => input.kind === 'trigger')).toHaveLength(1)
+
+  const diagnostic = await accept({ ...candidate, threadId: 'codex-thread-b', itemId: 'assistant-3',
+    repository: 'another/project' }, new AbortController().signal)
+  const diagnosticTicket = runtime.store.tickets.get(diagnostic)!
+  expect(runtime.store.triggers.get(diagnosticTicket.origin.triggerId)?.meta).toMatchObject({
+    githubBinding: 'unavailable', workspaceMode: 'analysis' })
+  expect(Object.fromEntries(runtime.ticketEnvironment(diagnosticTicket).map(row => [row.key, row.value])))
+    .toMatchObject({ DSH_SUPERAGENT_GITHUB_REPOSITORY: '', DSH_SUPERAGENT_GITHUB_ACCOUNT: '' })
+  expect(runtime.store.db.prepare('SELECT count(*) AS n FROM outbox').get()).toMatchObject({ n: 0 })
+  expect(relays(runtime.masterId)).toEqual([])
+})
+
 it('fans a person\'s later thread message out to the live worker as context and tells the orchestrator, without an Eval', async () => {
   const { ticket, sessionId } = await acceptedTicket()
   deliveries.mockClear()

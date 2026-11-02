@@ -23,6 +23,7 @@ export interface Api {
   'GET codex': { query?: Paged & { scope?: 'recent' | 'all' };
     response: { configured: boolean; observation?: CodexObservation; monitor: CodexMonitorView } }
   'POST codex/monitor': { body: { enabled: boolean }; response: CodexMonitorView }
+  'POST codex/auto-handoff': { body: { enabled: boolean }; response: CodexMonitorView }
   'POST codex/attention/:id/ack': { body: { itemId: string; at: string }; response: CodexMonitorView }
   'GET state': { response: StateView }
   'GET overview': { response: OverviewView & { codexAttention?: number;

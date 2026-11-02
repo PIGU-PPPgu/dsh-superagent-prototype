@@ -2,12 +2,13 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { mkdir, rmdir, stat } from 'node:fs/promises'
+import { mkdir, rm, rmdir, stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { key, latestAssignment, latestReport, liveTicket, runningAssignment, threadKey, waitsForPerson } from '../core/index.ts'
 import type { AssessmentOutcome, Assignment, EngineForExecutor, Execution, Executor, Mandate, PolicyEffect, Ticket, TicketInput, Trigger }
   from '../core/index.ts'
 import type { Machine } from '../deployment.ts'
+import { GithubAccountsSchema } from '../deployment.ts'
 import { runAsWorker, verifyDirectory } from '../infra/environment.ts'
 import type { Settings } from '../policy.ts'
 import type { Store } from '../app/store.ts'
@@ -16,6 +17,7 @@ import { executionRoot, type Variable } from '../app/execution-environment.ts'
 import type { Sessions } from '../app/sessions.ts'
 import { WorktreeNameSchema } from '../app/assessment.ts'
 import { resultRelay } from '../app/notices.ts'
+import { GITHUB_BINDING_ENV, githubBindingOf } from '../sources/github-binding.ts'
 import type { HealthEntry } from '../infra/health.ts'
 import { cancelled, collectJob, killJobs, runningJobs, stopBackground, stopSubagents, until, untilQuiet } from './background.ts'
 
@@ -251,7 +253,27 @@ export class DshExecutor implements Executor {
     const env = Object.fromEntries(this.host.environment(ticket).map(variable => [variable.key, variable.value]))
     // Enforce a timeout so a hung prepare command (such as on a credential prompt) fails the ticket instead of holding a worker slot indefinitely.
     const signal = AbortSignal.any([this.host.lifetime, AbortSignal.timeout(PREPARE_TIMEOUT_MS)])
-    if (command) await runAsWorker(this.host.context.subprocess, ['sh', '-c', command], dirname(directory), signal, env)
+    const source = sourceTrigger(this.host, ticket)
+    const binding = source ? githubBindingOf(source) : undefined
+    if (source?.source === 'codex' && source.meta.workspaceMode !== 'analysis' && source.meta.workspaceMode !== 'execute') {
+      throw new PrepareFailed('The Codex handoff has no valid workspace mode')
+    }
+    if (source?.source === 'codex' && (source.meta.workspaceMode === 'analysis' || !binding?.available)) {
+      await mkdir(directory, { recursive: true })
+      await verifyDirectory(directory, this.host.context.subprocess, this.host.lifetime)
+      return
+    }
+    if (source?.source === 'codex' && source.meta.workspaceMode === 'execute') {
+      const repository = this.repositoryOf(source)
+      if (!repository) throw new PrepareFailed('The Codex handoff names no available GitHub repository')
+      await runAsWorker(this.host.context.subprocess, ['git', 'clone', `https://github.com/${repository}.git`, directory], dirname(directory), signal,
+        { ...env, [GITHUB_BINDING_ENV]: binding?.id ?? 'default' })
+        .catch(async (error: unknown) => {
+          await rm(directory, { recursive: true, force: true }).catch(() => { /* Git may have left a partial clone, which the output explains. */ })
+          throw new PrepareFailed(`The Codex workspace clone failed: ${error instanceof Error ? error.message : String(error)}`)
+        })
+    }
+    else if (command) await runAsWorker(this.host.context.subprocess, ['sh', '-c', command], dirname(directory), signal, env)
       .catch(async (error: unknown) => {
         // Remove an empty directory left by a failed prepare command so a later retry does not treat it as already prepared.
         await rmdir(directory).catch(() => { /* Absent, or holding what the command wrote, which the output explains. */ })
@@ -259,6 +281,16 @@ export class DshExecutor implements Executor {
       })
     await mkdir(directory, { recursive: true })
     await verifyDirectory(directory, this.host.context.subprocess, this.host.lifetime)
+  }
+
+  private repositoryOf(trigger: Trigger): string | undefined {
+    const binding = githubBindingOf(trigger)
+    if (!binding.available) return undefined
+    const config = GithubAccountsSchema.parse(this.host.store.settings().sources.github?.config ?? {})
+    const repository = binding.id
+      ? config.bindings.find(item => item.id === binding.id)?.repository : config.repository
+    return repository && typeof trigger.meta.repository === 'string'
+      && repository.toLowerCase() === trigger.meta.repository.toLowerCase() ? repository : undefined
   }
   /** Enqueues a `launch` effect for an accepted or resumed assignment; launches start in queue order as worker slots free up. */
   start(ticket: Ticket, assignment: Assignment): void {
@@ -417,10 +449,14 @@ export class DshExecutor implements Executor {
   private failed(ticketId: string, summary: string): void {
     this.host.store.atomic(() => {
       const updated = this.host.engine.report(ticketId, { state: 'failed', summary })
-      this.relay(resultRelay(updated, 'failed', summary))
+      if (!this.panelOnly(updated)) this.relay(resultRelay(updated, 'failed', summary))
     })
   }
   private relay({ id, text }: { id: string; text: string }): void { this.host.sessions.relay(id, text) }
+  private panelOnly(ticket: Ticket): boolean {
+    const origin = sourceTrigger(this.host, ticket)
+    return origin?.source === 'codex' && !origin.channel
+  }
   private async launch(ticket: Ticket, assignment: Assignment): Promise<void> {
     const current = () => {
       if (this.host.closing()) throw new Error('dsh-superagent is stopping')
@@ -664,6 +700,7 @@ export class DshExecutor implements Executor {
       const before = latestReport(current)?.summary ?? ''
       const updated = this.host.engine.report(ticket.id, { state: 'waiting', summary: said || before })
       // A quiet final after orchestrator_report is not a new status or an empty handoff.
+      if (this.panelOnly(ticket)) return
       if (said) this.relay(resultRelay(updated, 'waiting', said))
       else if (!before.trim()) {
         this.relay(resultRelay(updated, 'waiting', 'Worker ended without a status report. Use orchestrator_ticket_request_status to request one.'))

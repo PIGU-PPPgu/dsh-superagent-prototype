@@ -8,6 +8,8 @@ export interface MonitoredCodexThread {
   archived: boolean
   sourceKind: string
   parentThreadId?: string
+  /** Canonical owner/name only when the stored Git origin is a GitHub.com repository. */
+  repository?: string
 }
 
 export interface CodexMonitorRpc {

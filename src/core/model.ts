@@ -114,6 +114,8 @@ interface Received { source?: string; scope?: Record<string, unknown>; row?: str
  * `sender` names the allowed sender at acceptance time, and `rules` the rules an assessment matched.
  */
 export type MandateBasis = Received & { sender?: string; rules?: string[] } & (
+  /** Internal Codex handoff explicitly enabled for this installation; no external reply channel. */
+  | { via: 'codex-auto'; addressed: 'direct' }
   | { via: 'addressed'; addressed: 'mention' | 'direct' }
   | { via: 'followup'; authority?: string }
   | { via: 'admission'; cell: AdmissionCell; addressed?: 'mention' | 'direct'; observation?: { mode: AcceptMode } }

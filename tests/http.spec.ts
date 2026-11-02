@@ -103,6 +103,8 @@ it('shows Codex observations through a read-only panel route when the bridge is 
     view: () => ({ enabled: false, total: 1, attentionTotal: 1, attention: [], threads: [] }),
     setEnabled: (enabled: boolean) => { actions.push(enabled); return { enabled, total: 1, attentionTotal: 1,
       attention: [], threads: [] } },
+    setAutoHandoff: (enabled: boolean) => { actions.push(['autoHandoff', enabled]); return { enabled: true,
+      autoHandoffEnabled: enabled, total: 1, attentionTotal: 1, attention: [], threads: [] } },
     acknowledge: (id: string, itemId: string, at: string) => { actions.push([id, itemId, at]); return { enabled: true, total: 1, attentionTotal: 0,
       attention: [], threads: [] } },
   } })
@@ -111,7 +113,10 @@ it('shows Codex observations through a read-only panel route when the bridge is 
   expect(await withMonitor('POST', 'codex/attention/thread-a/ack',
     { itemId: 'item-a', at: '2026-11-01T12:00:00Z' })).toMatchObject({ status: 200,
     body: { attentionTotal: 0 } })
-  expect(actions).toEqual([true, ['thread-a', 'item-a', '2026-11-01T12:00:00Z']])
+  expect(await withMonitor('POST', 'codex/auto-handoff', { enabled: true })).toMatchObject({ status: 200,
+    body: { autoHandoffEnabled: true } })
+  expect(await withMonitor('POST', 'codex/auto-handoff', { enabled: 'true' })).toMatchObject({ status: 400 })
+  expect(actions).toEqual([true, ['thread-a', 'item-a', '2026-11-01T12:00:00Z'], ['autoHandoff', true]])
 })
 
 it('answers a prompt save that lost a race with 409, and a settings body over 128 KiB with 400', async () => {

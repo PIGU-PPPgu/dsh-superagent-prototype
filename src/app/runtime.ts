@@ -14,18 +14,19 @@ import { existsSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { CodexFileMonitor } from '../codex/file-bridge.ts'
-import { CodexMonitor } from './codex-monitor.ts'
+import { CodexMonitor, type CodexFailureCandidate } from './codex-monitor.ts'
 import { registerGithubShellEnv } from './github-shell-env.ts'
 import { lockSync } from 'proper-lockfile'
-import { Engine, key, reasonText, type EngineForSettings, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
+import { Engine, key, type EngineForSettings, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
+import { sameName } from '../infra/text.ts'
 import { allowedSender, settingsPolicy } from '../policy.ts'
+import { githubBindingOf } from '../sources/github-binding.ts'
 import { SourceRegistry } from '../sources/registry.ts'
 import { Commands } from '../infra/commands.ts'
 import type { Deployment, Machine } from '../deployment.ts'
 import { environmentOf, ticketEnvironment, type Variable } from './execution-environment.ts'
 import type { SetupProblem } from '../setup.ts'
-import { DshExecutor, sourceTrigger, triggerMessage, workerSessionId } from '../executor/dsh.ts'
-import { ticketCard } from './cards.ts'
+import { DshExecutor, sourceTrigger, workerSessionId } from '../executor/dsh.ts'
 import { MasterAssessor } from './assessment.ts'
 import { KV } from '../kv.ts'
 import { Store } from './store.ts'
@@ -90,6 +91,7 @@ export class Runtime extends Service implements SourceHost {
   private readonly codexMonitor: CodexMonitor
   /** Non-zero while a main-Session tool is executing an Engine command, suppressing self-triggered domain event notices. */
   private quiet = 0
+  private readonly authorizedCodexHandoffs = new Set<string>()
   constructor(ctx: Context, readonly machine: Machine, restart: () => void) {
     super(ctx, 'orchestrator')
     const runtime = this
@@ -102,7 +104,8 @@ export class Runtime extends Service implements SourceHost {
     try {
       const report = (error: unknown) => { ctx.logger.warn('dsh-superagent: %s', String(error)) }
       const store = opened = this.store = new Store(join(machine.stateDir, 'orchestrator.sqlite'), report)
-      this.codexMonitor = new CodexMonitor({ store, context: ctx })
+      this.codexMonitor = new CodexMonitor({ store, context: ctx,
+        autoHandoff: (candidate, signal) => this.acceptCodexFailure(candidate, signal) })
       const setup = this.setup = new Setup({ context: ctx, machine, lifetime: this.lifetime, restart })
       const deployed = () => setup.configured()
         ? environmentOf({ deployment: setup.deployment, sources: this.sources, settings: store.settings() }) : undefined
@@ -151,17 +154,25 @@ export class Runtime extends Service implements SourceHost {
         deliver: (id, text) => sessions.prompt(masterId, id, text, 'steer'), candidateCard: candidate => candidateCard(links, candidate) })
       const outbox = this.outbox = new Outbox({ store, effects, sources, commands, paused: () => this.paused() })
       const { assessor, executor } = this
-      const policy = () => settingsPolicy(store.settings(), sources)
+      const policy = () => settingsPolicy(store.settings(), sources,
+        trigger => this.authorizedCodexHandoffs.has(trigger.id))
       const engine = this.engine = new Engine({ repo: store, scope: sources, policy, assessor, executor,
         outbox, prepareTicket: (ticket, outcome) => executor.prepare(ticket, outcome), emit: event => {
           // Notify the main Session only about domain events it did not initiate itself.
-          const notice = this.quiet ? undefined : eventNotice(event, id => store.tickets.get(id))
+          const codexEvent = event.type === 'ticket.ended'
+            ? store.triggers.get(store.tickets.get(event.data.ticketId)?.origin.triggerId ?? '')?.source === 'codex'
+            : event.type === 'trigger.requeued'
+              ? store.triggers.get(event.data.triggerId)?.source === 'codex'
+              : event.type === 'thread.unsubscribed' && event.data.threadKey.startsWith('codex:')
+          const notice = this.quiet || codexEvent ? undefined : eventNotice(event, id => store.tickets.get(id))
           if (notice) sessions.notify(...notice)
           // A person's message that reached an open ticket is the ticket's; the main Session hears of it in the same transaction,
           // and of one for an ended ticket once it resumes, unless it routed the message there itself.
           const followed = !this.quiet && (event.type === 'trigger.received' || event.type === 'ticket.resumed' || event.type === 'trigger.followup')
           const followup = followed ? followupNotice(store, sources, event.data.triggerId) : undefined
-          if (followup) sessions.relay(followup.id, followup.text)
+          const codexFollowup = (event.type === 'trigger.received' || event.type === 'ticket.resumed' || event.type === 'trigger.followup')
+            && store.triggers.get(event.data.triggerId)?.source === 'codex'
+          if (followup && !codexFollowup) sessions.relay(followup.id, followup.text)
           // Notify the ticket's conversations whenever it ends via a pull request.
           const ended = event.type === 'ticket.ended' ? store.tickets.get(event.data.ticketId) : undefined
           if (ended && setup.configured()) {
@@ -170,7 +181,9 @@ export class Runtime extends Service implements SourceHost {
             const bindingId = origin?.source === 'github' && typeof origin.meta.bindingId === 'string'
               ? origin.meta.bindingId : undefined
             const repository = bindingId ? setup.deployment.githubBindings?.[bindingId]?.repository : setup.deployment.repository
-            if (repository) for (const message of pullEndNotices(ended, request, repository)) outbox.send(message)
+            if (origin?.source !== 'codex' && repository) {
+              for (const message of pullEndNotices(ended, request, repository)) outbox.send(message)
+            }
           }
         } })
       // Update the `evals` health entry on every pass if an evaluation failed as unavailable within the last hour.
@@ -212,12 +225,78 @@ export class Runtime extends Service implements SourceHost {
   ticketEnvironment(ticket: Ticket): Variable[] {
     const trigger = sourceTrigger(this, ticket)
     const { setup: { deployment }, sources } = this
-    const bindingId = trigger?.source === 'github' && typeof trigger.meta.bindingId === 'string'
-      ? trigger.meta.bindingId : undefined
-    const binding = bindingId ? deployment.githubBindings?.[bindingId] : undefined
-    if (bindingId && !binding) throw new Error(`GitHub binding ${bindingId} is unavailable for this ticket`)
-    return ticketEnvironment({ deployment: binding ? { ...deployment, ...binding } : deployment,
+    const binding = trigger ? githubBindingOf(trigger) : undefined
+    if (trigger?.source === 'codex' && !binding?.available) return ticketEnvironment({ deployment: {
+      ...deployment, repository: '', github: { cli: '', login: '', noreply: '' }, githubBindings: {} },
       sources, settings: this.store.settings(), ticket, ...trigger ? { trigger } : {} })
+    const selected = binding?.id ? deployment.githubBindings?.[binding.id] : undefined
+    if (binding?.id && !selected) throw new Error(`GitHub binding ${binding.id} is unavailable for this ticket`)
+    return ticketEnvironment({ deployment: selected ? { ...deployment, ...selected } : deployment,
+      sources, settings: this.store.settings(), ticket, ...trigger ? { trigger } : {} })
+  }
+  /** Accept only new, assistant-evidenced failures in a separate DSH ticket. */
+  private async acceptCodexFailure(candidate: CodexFailureCandidate, signal: AbortSignal): Promise<string> {
+    signal.throwIfAborted()
+    if (this.closing() || this.paused()) throw new Error('Codex handoff is unavailable while DSH is paused')
+    const { store, engine } = this
+    const mapping = KV.codex.handoff(candidate.threadId)
+    const previous = store.get(mapping)
+    if (previous?.itemId === candidate.itemId) {
+      if (store.tickets.get(previous.ticketId)) return previous.ticketId
+      throw new Error('The previous Codex handoff ticket is missing')
+    }
+    const deployment = this.setup.deployment
+    const matchingBinding = Object.entries(deployment.githubBindings ?? {}).find(([, binding]) =>
+      candidate.repository && sameName(binding.repository, candidate.repository))
+    const githubBinding = candidate.repository && sameName(deployment.repository, candidate.repository)
+      ? 'default' : matchingBinding?.[0] ?? 'unavailable'
+    const workspaceMode = githubBinding === 'unavailable' ? 'analysis' : 'execute'
+    const trigger: Trigger = {
+      id: key('codex-handoff', candidate.threadId, candidate.itemId), source: 'codex',
+      threads: [{ source: 'codex', id: key('codex-item', candidate.threadId, candidate.itemId) }],
+      actor: { source: 'codex', id: 'local-codex-monitor' }, human: true, addressed: 'direct',
+      at: now(),
+      text: JSON.stringify({ kind: 'Codex historical failure', threadId: candidate.threadId,
+        title: candidate.title.slice(0, 200), summary: candidate.summary.slice(0, 300),
+        evidence: candidate.evidence.slice(0, 200),
+        messages: candidate.messages.slice(-6).map(message => ({ role: message.role, text: message.text.slice(0, 1_500) })) }),
+      meta: { threadId: candidate.threadId, itemId: candidate.itemId,
+        ...(candidate.repository ? { repository: candidate.repository } : {}), githubBinding, workspaceMode },
+    }
+    const scope = workspaceMode === 'execute'
+      ? `Investigate the reported Codex failure in ${candidate.repository} and complete the bounded repair in this ticket's isolated checkout.`
+      : 'Investigate the reported Codex failure in this ticket\'s isolated workspace and report a diagnosis.'
+    this.authorizedCodexHandoffs.add(trigger.id)
+    this.quiet++
+    try {
+      return store.atomic(() => {
+        signal.throwIfAborted()
+        const active = store.tickets.open().find(ticket => {
+          const origin = sourceTrigger(this, ticket)
+          return origin?.source === 'codex' && origin.meta.threadId === candidate.threadId
+        })
+        const received = engine.receive(trigger)
+        if (received === 'filtered') throw new Error('Codex handoff was filtered by source scope')
+        let ticketId: string
+        if (active) {
+          if (received !== 'duplicate') engine.attach(active.id, trigger.id, 'New failure evidence from the same Codex conversation')
+          ticketId = active.id
+        } else {
+          const decision = engine.decide(trigger.id, { kind: 'accept', title: `Codex: ${candidate.title.slice(0, 120)}`,
+            scope, reason: 'New assistant-evidenced Codex failure', name: 'codex-failure',
+            note: workspaceMode === 'execute'
+              ? 'This is a historical Codex snapshot. Work only in this ticket workspace. Do not send messages to, resume, or interrupt the original Codex conversation.'
+              : 'This is a historical Codex snapshot. Diagnose in this empty ticket workspace. Do not use a GitHub account, clone an unrelated repository, or write to the original Codex conversation.' })
+          if (decision.kind !== 'accept' || !decision.ticketId) throw new Error('Codex handoff was not accepted')
+          ticketId = decision.ticketId
+        }
+        store.set(mapping, { itemId: candidate.itemId, ticketId, at: now() })
+        return ticketId
+      })
+    } finally {
+      this.quiet--
+      this.authorizedCodexHandoffs.delete(trigger.id)
+    }
   }
   checkSetup(): void { this.setup.check() }
   receive(trigger: Trigger): ReceiveResult { return this.passes.receive(trigger) }

@@ -2,9 +2,10 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { ticketOfSession } from '../executor/dsh.ts'
+import { GITHUB_BINDING_ENV, githubBindingOf } from '../sources/github-binding.ts'
 import type { Store } from './store.ts'
 
-export const GITHUB_BINDING_ENV = 'DSH_SUPERAGENT_GITHUB_BINDING'
+export { GITHUB_BINDING_ENV }
 interface ShellEnvService {
   register(contributor: { name: string; variables: Record<string, { description: string }>;
     resolve(execution: ToolExecution): Readonly<Partial<Record<string, string>>> }): () => void
@@ -29,8 +30,8 @@ export function registerGithubShellEnv(ctx: Context, store: Pick<Store, 'tickets
         const ticket = store.tickets.get(ticketId)
         if (!ticket) return { [GITHUB_BINDING_ENV]: 'unavailable' }
         const origin = store.triggers.get(ticket.origin.triggerId)
-        return { [GITHUB_BINDING_ENV]: origin?.source === 'github' && typeof origin.meta.bindingId === 'string'
-          ? origin.meta.bindingId : 'default' }
+        const binding = origin ? githubBindingOf(origin) : undefined
+        return { [GITHUB_BINDING_ENV]: binding ? binding.available ? binding.id ?? 'default' : 'unavailable' : 'default' }
       },
     }))
   })

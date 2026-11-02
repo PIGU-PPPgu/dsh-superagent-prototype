@@ -22,7 +22,7 @@ const timeText = (value: string | undefined, chinese: boolean): string => {
 }
 
 export function CodexPage() {
-  const { call, t } = usePanel()
+  const { call, t, navigate } = usePanel()
   const { restarts } = usePanelData()
   const chinese = t('tab.codex') === 'Codex 观察'
   const [offset, setOffset] = useState(0)
@@ -30,6 +30,7 @@ export function CodexPage() {
   const { data, error, reload } = usePoll(() => call('GET codex', { query: { offset, limit: PAGE_SIZE, scope } }),
     [call, restarts, offset, scope], 10_000)
   const toggle = useAction((enabled: boolean) => call('POST codex/monitor', { body: { enabled } }), { reload })
+  const autoHandoff = useAction((enabled: boolean) => call('POST codex/auto-handoff', { body: { enabled } }), { reload })
   const acknowledge = useAction((id: string, itemId: string, at: string) =>
     call('POST codex/attention/:id/ack', { id, body: { itemId, at } }), { reload })
   const monitor = data?.monitor
@@ -42,6 +43,11 @@ export function CodexPage() {
       <Button variant={monitor?.enabled ? 'outline' : undefined} size="sm" disabled={toggle.busy}
         onClick={() => { void toggle.run(!monitor?.enabled) }}>
         {monitor?.enabled ? (chinese ? '暂停监控' : 'Pause monitoring') : (chinese ? '开始监控' : 'Start monitoring')}
+      </Button>
+      <Button variant={monitor?.autoHandoffEnabled ? 'outline' : undefined} size="sm" disabled={autoHandoff.busy}
+        onClick={() => { void autoHandoff.run(!monitor?.autoHandoffEnabled) }}>
+        {monitor?.autoHandoffEnabled ? (chinese ? '关闭自动接单' : 'Disable auto handoff')
+          : (chinese ? '开启自动接单' : 'Enable auto handoff')}
       </Button>
     </div>
     {error && <p className="dt-error" role="alert">{error.message}</p>}
@@ -96,12 +102,17 @@ export function CodexPage() {
           <div className="dt-row-title"><strong>{thread.title}</strong></div>
           {thread.summary && <p className="dt-row-quote dt-clamp">{thread.summary}</p>}
           {thread.error && <p className="dt-error">{chinese ? '归纳暂不可用' : 'Summary unavailable'}</p>}
+          {thread.handoffError && <p className="dt-error" role="alert">{chinese ? '自动接单暂不可用'
+            : 'Automatic handoff unavailable'}</p>}
           <div className="dt-row-meta"><span>{thread.stage ? (chinese ? stages[thread.stage]?.zh : stages[thread.stage]?.en)
             : (chinese ? '尚未归纳' : 'Not summarized')}</span>
             <span>{timeText(thread.activityAt ?? thread.updatedAt, chinese)}</span>
             {!!thread.childCount && <span>{thread.childCount} {chinese ? '个子线程' : 'child threads'}</span>}
             {thread.archived && <span>{chinese ? '已归档' : 'Archived'}</span>}
             <span className="dt-mono">{thread.id}</span></div>
+          {thread.handoffTicketId && <div className="dt-row-buttons"><Button variant="outline" size="sm"
+            onClick={() => navigate({ page: 'execution', id: thread.handoffTicketId! })}>{chinese ? '查看工单'
+              : 'Open ticket'}</Button></div>}
         </div>
       </li>)}</ul>
       <div className="dt-row-buttons">

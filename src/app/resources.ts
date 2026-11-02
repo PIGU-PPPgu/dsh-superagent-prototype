@@ -3,6 +3,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import { UserError, key, latestReport, reached, runningAssignment, threadKey, type Ticket, type Trigger } from '../core/index.ts'
 import { batchOf, inputMessage, triggerMessage, workerSessionId } from '../executor/dsh.ts'
 import { readGithub } from '../sources/github-read.ts'
+import { githubBindingOf } from '../sources/github-binding.ts'
 import { feishuReferences, feishuRead } from '../sources/feishu-read.ts'
 import { feishuRef } from '../sources/feishu.ts'
 import { feishuTriggerId } from '../sources/feishu-trigger.ts'
@@ -212,7 +213,11 @@ const ROUTES: readonly Route[] = [
     const explicit = Object.hasOwn(bindings, first) ? first : undefined
     const ticket = read.ticketId ? read.host.store.tickets.get(read.ticketId) : undefined
     const origin = ticket && read.host.store.triggers.get(ticket.origin.triggerId)
-    const owned = origin?.source === 'github' && typeof origin.meta.bindingId === 'string' ? origin.meta.bindingId : undefined
+    const ownedBinding = origin ? githubBindingOf(origin) : undefined
+    if (origin?.source === 'codex' && (!ownedBinding?.available || origin.meta.workspaceMode !== 'execute')) {
+      throw new Error('This Codex ticket has no GitHub repository binding')
+    }
+    const owned = origin?.source === 'github' || origin?.source === 'codex' ? ownedBinding?.id : undefined
     if (read.ticketId && explicit && explicit !== owned) throw new Error('GitHub binding does not belong to this worker')
     const bindingId = explicit ?? owned
     const resource = explicit ? `github/${read.rest.slice(explicit.length + 1)}` : read.resource

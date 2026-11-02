@@ -328,7 +328,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/codex/local-ui.ts` | Self-contained local dashboard HTML, CSS and browser code |
 | `src/codex/index.ts` | Public read-only Codex adapter exports |
 | `src/app/runtime.ts` | The Runtime, the composition root, with its start and stop |
-| `src/app/codex-monitor.ts` | Automatic Codex history scan, model triage, private persistence and panel attention |
+| `src/app/codex-monitor.ts` | Automatic Codex history scan, model triage, private persistence, panel attention and separately enabled failure handoff |
 | `src/app/setup.ts` | Setup, and `setupChanged`, whether a save changes a field setup reads |
 | `src/app/passes.ts` | Passes, the pass scheduler |
 | `src/app/outbox.ts` | The Outbox: the Engine's `Outbox` port, the receipts and the `reply` effects that send them |
@@ -431,7 +431,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/codex-monitor-read.spec.ts` | All-source and archived discovery, bounded incremental Codex message reads |
 | `tests/codex-local-inventory.spec.ts` | Filesystem and SQLite inventory, source normalization and path boundaries |
 | `tests/codex-triage.spec.ts` | Bounded untrusted model input and strict attention output |
-| `tests/codex-monitor.spec.ts` | Baseline, changed-message triage, acknowledgement, restart and failed-read retry |
+| `tests/codex-monitor.spec.ts` | Baseline, changed-message triage, acknowledgement, restart, failed-read retry and opt-in failure handoff |
+| `tests/codex-workspace.spec.ts` | Isolated Codex analysis and repository-bound execution workspaces, plus panel-only reporting |
 | `tests/commands.spec.ts` | CLI calls as the deployment's accounts, the Channels' answers, and repository-scoped GitHub calls |
 | `tests/github-binding.spec.ts` | GitHub binding isolation for commands, cursors, threads and tickets |
 | `tests/github-shell-env.spec.ts` | DSH worker and subagent shell calls use their ticket's GitHub binding |

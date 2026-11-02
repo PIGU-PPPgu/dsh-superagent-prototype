@@ -1,7 +1,24 @@
 /** A GitHub Source context confined to one configured repository and CLI identity. */
-import type { Thread, ThreadRef, Ticket } from '../core/index.ts'
+import type { Thread, ThreadRef, Ticket, Trigger } from '../core/index.ts'
 import { record, type Family, type Key } from '../kv.ts'
 import type { SourceContext } from './host.ts'
+
+export const GITHUB_BINDING_ENV = 'DSH_SUPERAGENT_GITHUB_BINDING'
+export interface GithubBindingSelection { id?: string; available: boolean }
+
+/** Resolves the GitHub account binding a Trigger's commands must use, including internal Codex handoffs. */
+export function githubBindingOf(trigger: Trigger): GithubBindingSelection {
+  if (trigger.source === 'github') return { id: typeof trigger.meta.bindingId === 'string' ? trigger.meta.bindingId : undefined, available: true }
+  if (trigger.source === 'codex') {
+    if (trigger.meta.workspaceMode === 'analysis') return { available: false }
+    const binding = trigger.meta.githubBinding
+    if (binding === 'unavailable') return { available: false }
+    if (binding === 'default') return { available: true }
+    if (typeof binding !== 'string' || !binding) return { available: false }
+    return { id: binding, available: true }
+  }
+  return { available: true }
+}
 
 export interface GithubContext extends SourceContext { readonly bindingId?: string }
 

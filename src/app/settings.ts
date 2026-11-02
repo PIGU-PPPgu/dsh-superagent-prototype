@@ -104,7 +104,7 @@ export class Settings {
     if (!entry) this.syncs.set(id, entry = this.host.health.claim(`sync:${id}`))
     return entry
   }
-  /** An open GitHub ticket must keep the repository and CLI that accepted it. */
+  /** An open GitHub or repository-bound Codex ticket must keep the repository and CLI that accepted it. */
   private checkGithubTickets(before: SettingsValue, after: SettingsValue): void {
     const old = GithubAccountsSchema.parse(before.sources.github?.config ?? {})
     const next = GithubAccountsSchema.parse(after.sources.github?.config ?? {})
@@ -113,8 +113,9 @@ export class Settings {
       : config.bindings.find(row => row.id === id)
     for (const ticket of this.host.store.tickets.open()) {
       const origin = this.host.store.triggers.get(ticket.origin.triggerId)
-      if (origin?.source !== 'github') continue
-      const id = typeof origin.meta.bindingId === 'string' ? origin.meta.bindingId : 'default'
+      if (origin?.source !== 'github' && !(origin?.source === 'codex' && origin.meta.workspaceMode === 'execute')) continue
+      const id = origin.source === 'codex'
+        ? String(origin.meta.githubBinding) : typeof origin.meta.bindingId === 'string' ? origin.meta.bindingId : 'default'
       const previous = binding(old, id), candidate = binding(next, id)
       if (!previous || !candidate || previous.repository.toLowerCase() !== candidate.repository.toLowerCase()
         || previous.cli !== candidate.cli) throw new UserError('githubBindingInUse', { binding: id })

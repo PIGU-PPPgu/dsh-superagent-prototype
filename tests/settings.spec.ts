@@ -67,6 +67,31 @@ it('keeps the account and repository of a binding with an open ticket', async ()
   expect(store.settings().sources.github!.config.bindings).toEqual(bindings)
 })
 
+it('keeps the account and repository of an open Codex execution ticket', async () => {
+  h = await startRuntime()
+  const { settings, store } = h.runtime
+  const current = store.settings()
+  const github = current.sources.github!
+  const bindings = [{ id: 'other', repository: 'acme/other', cli: '/path/other-gh' }]
+  store.saveSettings({ ...current, sources: { ...current.sources,
+    github: { ...github, config: { ...github.config, bindings } } } })
+  const trigger = { id: 'codex-failure', source: 'codex', threads: [{ source: 'codex', id: 'thread-item' }],
+    actor: { source: 'codex', id: 'local-codex-monitor' }, human: true, addressed: 'direct' as const,
+    at: '2026-11-01T00:00:00.000Z', text: 'failure', meta: { githubBinding: 'other', workspaceMode: 'execute' } }
+  store.triggers.save(trigger)
+  store.tickets.save({ id: 't-codex', title: 'Failure', decisionId: 'd',
+    mandate: { strength: 'explicit', policyVersion: '', basis: { via: 'codex-auto', addressed: 'direct' },
+      actor: trigger.actor, scope: '' }, channels: [], assignments: [], inputs: [], undelivered: [],
+    createdAt: '', updatedAt: '', origin: { triggerId: trigger.id, triggerIds: [trigger.id] } } as Ticket)
+  const revision = store.blockRevision('source:github')
+  const value = settings.block('source:github').value as { enabled: boolean; config: Record<string, unknown> }
+  await expect(settings.save('source:github', { ...value, config: { ...value.config, bindings: [] } }, revision, 'panel'))
+    .rejects.toMatchObject({ code: 'githubBindingInUse' })
+  await expect(settings.save('source:github', { ...value, config: { ...value.config,
+    bindings: [{ ...bindings[0]!, cli: '/path/new-gh' }] } }, revision, 'panel'))
+    .rejects.toMatchObject({ code: 'githubBindingInUse' })
+})
+
 it('refuses a Policy sync that a Policy save outran, reports it on sync:feishu, and keeps the save', async () => {
   h = await startRuntime()
   const { settings, store } = h.runtime

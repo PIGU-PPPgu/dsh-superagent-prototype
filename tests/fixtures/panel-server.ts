@@ -309,6 +309,10 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
     server.codex = { ...server.codex, enabled: body.enabled }
     return server.codex
   } },
+  'POST codex/auto-handoff': { body: true, answer: ({ body }) => {
+    server.codex = { ...server.codex, autoHandoffEnabled: body.enabled }
+    return server.codex
+  } },
   'POST codex/attention/:id/ack': { body: true, answer: ({ params, body }) => {
     const matches = (row: CodexMonitorView['attention'][number]) => row.id === params.id
       && row.attention?.itemId === body.itemId && row.attention.at === body.at

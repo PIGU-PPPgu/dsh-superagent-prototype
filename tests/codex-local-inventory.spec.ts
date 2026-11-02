@@ -142,6 +142,21 @@ it('uses the rollout mtime when a resumed thread has a stale database timestamp'
   expect(thread?.updatedAt).toBe(resumed.toISOString())
 })
 
+it('keeps only a credential-free GitHub repository from stored origin metadata', async () => {
+  const home = makeHome()
+  const ids = ['abababab-0000-4000-8000-000000000011', 'abababab-0000-4000-8000-000000000012']
+  for (const id of ids) rollout(home, 'sessions', id)
+  stateDatabase(home, ids.map(id => ({ id, source: 'vscode' })))
+  const db = new DatabaseSync(join(home, 'state_5.sqlite'))
+  db.exec('alter table threads add column git_origin_url text')
+  db.prepare('update threads set git_origin_url = ? where id = ?').run('git@github.com:PIGU-PPPgu/intellibrain.git', ids[0]!)
+  db.prepare('update threads set git_origin_url = ? where id = ?').run('https://token@example.com/private/repo.git', ids[1]!)
+  db.close()
+  const rows = await listLocalCodexInventory(home, new AbortController().signal)
+  expect(rows[0]?.repository).toBe('PIGU-PPPgu/intellibrain')
+  expect(rows[1]).not.toHaveProperty('repository')
+})
+
 it('deduplicates two rollout files that carry the same thread ID', async () => {
   const home = makeHome()
   const directory = join(home, 'sessions', '2026', '01', '02')

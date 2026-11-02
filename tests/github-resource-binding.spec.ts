@@ -9,10 +9,14 @@ it('reads GitHub resources through the ticket account and rejects another bindin
     cli: '/path/other-gh', login: 'other-agent', noreply: '8+other-agent@users.noreply.github.com' } } } })
   const commands = new Commands(() => deployment, {}, new AbortController().signal)
   const tickets = new Map([['primary', { origin: { triggerId: 'primary-trigger' } }],
-    ['secondary', { origin: { triggerId: 'secondary-trigger' } }]])
+    ['secondary', { origin: { triggerId: 'secondary-trigger' } }],
+    ['codex-secondary', { origin: { triggerId: 'codex-secondary-trigger' } }],
+    ['codex-analysis', { origin: { triggerId: 'codex-analysis-trigger' } }]])
   const host = { commands, pages: new TextCache(100_000), masterId: 'master',
-    store: { tickets: { get: (id: string) => tickets.get(id) }, triggers: { get: (id: string) => ({ source: 'github',
-      meta: id === 'secondary-trigger' ? { bindingId: 'other' } : {} }) } } } as unknown as ResourceHost
+    store: { tickets: { get: (id: string) => tickets.get(id) }, triggers: { get: (id: string) => id.startsWith('codex-')
+      ? { source: 'codex', meta: id === 'codex-secondary-trigger'
+        ? { githubBinding: 'other', workspaceMode: 'execute' } : { githubBinding: 'unavailable', workspaceMode: 'analysis' } }
+      : { source: 'github', meta: id === 'secondary-trigger' ? { bindingId: 'other' } : {} } } } } as unknown as ResourceHost
   const run = vi.spyOn(Commands.prototype, 'run').mockImplementation(async (_program, args) => {
     const path = args[1] ?? ''
     const repository = path.startsWith('repos/acme/other/') ? 'acme/other' : 'acme/widgets'
@@ -31,8 +35,14 @@ it('reads GitHub resources through the ticket account and rejects another bindin
       .toContain('content from acme/other')
     expect(JSON.stringify(await readResource(host, 'github/issues/7', 0, 4000, 'secondary')))
       .toContain('content from acme/other')
+    expect(JSON.stringify(await readResource(host, 'github/issues/7', 0, 4000, 'codex-secondary')))
+      .toContain('content from acme/other')
     await expect(readResource(host, 'github/other/issues/7', 0, 4000, 'primary'))
       .rejects.toThrow('does not belong to this worker')
+    await expect(readResource(host, 'github/issues/7', 0, 4000, 'codex-analysis'))
+      .rejects.toThrow('no GitHub repository binding')
+    await expect(readResource(host, 'github/other/issues/7', 0, 4000, 'codex-analysis'))
+      .rejects.toThrow('no GitHub repository binding')
     expect(JSON.stringify(await readResource(host, 'github/other/issues/7/comments/1', 0, 4000)))
       .toContain('github/other/issues/7/comments/2')
     expect(run.mock.calls.some(([program, args]) => program === '/path/other-gh'

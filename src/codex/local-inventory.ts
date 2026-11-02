@@ -28,6 +28,13 @@ interface ThreadRow {
   source?: string
   updatedAt?: number
   parentThreadId?: string
+  repository?: string
+}
+
+function githubRepository(origin: unknown): string | undefined {
+  if (typeof origin !== 'string') return undefined
+  const match = /^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?\/?$/i.exec(origin)
+  return match ? `${match[1]}/${match[2]}` : undefined
 }
 
 function checkCancelled(signal: AbortSignal): void {
@@ -118,12 +125,13 @@ function tableColumns(db: DatabaseSync): Set<string> {
 }
 
 /** Reads thread metadata for the given IDs. A missing or damaged schema fails loudly. */
-function readThreadRows(db: DatabaseSync, ids: string[], hasParent: boolean): Map<string, ThreadRow> {
+function readThreadRows(db: DatabaseSync, ids: string[], hasParent: boolean, hasOrigin: boolean): Map<string, ThreadRow> {
   const rows = new Map<string, ThreadRow>()
   for (let index = 0; index < ids.length; index += QUERY_CHUNK) {
     const chunk = ids.slice(index, index + QUERY_CHUNK)
     const placeholders = chunk.map(() => '?').join(',')
     const sql = `select id, name, title, source, updated_at${hasParent ? ', attached_thread_parent_id' : ''}
+      ${hasOrigin ? ', git_origin_url' : ''}
       from threads where id in (${placeholders})`
     for (const row of db.prepare(sql).all(...chunk) as Record<string, unknown>[]) {
       const id = typeof row.id === 'string' ? row.id : undefined
@@ -136,6 +144,7 @@ function readThreadRows(db: DatabaseSync, ids: string[], hasParent: boolean): Ma
         ...(typeof row.updated_at === 'number' && Number.isFinite(row.updated_at) && row.updated_at > 0
           ? { updatedAt: row.updated_at } : {}),
         ...(parent ? { parentThreadId: parent } : {}),
+        ...(githubRepository(row.git_origin_url) ? { repository: githubRepository(row.git_origin_url) } : {}),
       })
     }
   }
@@ -158,7 +167,7 @@ function openStateDatabase(path: string, ids: string[]): Map<string, ThreadRow> 
     for (const required of ['id', 'source', 'updated_at']) {
       if (!columns.has(required)) throw new Error(`Codex state database is missing the threads.${required} column`)
     }
-    return readThreadRows(db, ids, columns.has('attached_thread_parent_id'))
+    return readThreadRows(db, ids, columns.has('attached_thread_parent_id'), columns.has('git_origin_url'))
   } finally { db.close() }
 }
 
@@ -252,6 +261,7 @@ export async function listLocalCodexInventory(codexHome: string, signal: AbortSi
         archived: file.archived,
         sourceKind: sourceValue ? source.sourceKind : 'unknown',
         ...(parentThreadId ? { parentThreadId } : {}),
+        ...(row?.repository ? { repository: row.repository } : {}),
       }
     })
 }

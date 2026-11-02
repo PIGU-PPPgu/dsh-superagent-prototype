@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, expect, it, vi } from 'vitest'
-import { CodexMonitor, type CodexMonitorDeps } from '../src/app/codex-monitor.ts'
+import { CodexMonitor, type CodexFailureCandidate, type CodexMonitorDeps } from '../src/app/codex-monitor.ts'
 import { Store } from '../src/app/store.ts'
 import type { MonitoredCodexThread } from '../src/codex/monitor-read.ts'
 import { listLocalCodexInventory } from '../src/codex/local-inventory.ts'
@@ -87,8 +87,9 @@ function fixture() {
     ({ default: { provider: 'magpie', model: 'test-model' } }) } } as unknown as CodexMonitorDeps['context']
   const connect = vi.fn(async () => rpc as unknown as Awaited<ReturnType<NonNullable<CodexMonitorDeps['connect']>>>)
   const inventory = vi.fn(async () => localRows)
-  const monitor = new CodexMonitor({ store, context, connect, inventory, now: () => now })
-  return { store, monitor, rpc, stream, inventory, requests, setPhase: (value: number) => { phase = value },
+  const autoHandoff = vi.fn(async (_candidate: CodexFailureCandidate) => 'ticket-codex')
+  const monitor = new CodexMonitor({ store, context, connect, inventory, now: () => now, autoHandoff })
+  return { store, monitor, rpc, stream, inventory, autoHandoff, requests, setPhase: (value: number) => { phase = value },
     setFailRead: (value: boolean) => { failRead = value },
     setMissingAnchor: (value: boolean) => { missingAnchor = value },
     setLongHistory: (value: boolean) => { longHistory = value },
@@ -108,6 +109,62 @@ function fixture() {
       return () => { release(); modelGate = undefined }
     } }
 }
+
+it('automatically hands off only a new assistant-evidenced failure, once per item', async () => {
+  const { monitor, autoHandoff, setDecision, setPhase, advanceMinutes } = fixture()
+  monitor.setEnabled(true)
+  await monitor.scanOnce()
+  monitor.setAutoHandoff(true)
+  advanceMinutes(1)
+  setDecision(JSON.stringify({ needsAttention: true, stage: 'failed', kind: 'failure',
+    reason: '新进展报告失败', action: '检查失败', summary: '发布任务失败', evidence: '请检查发布结果' }))
+  setPhase(1)
+  await monitor.scanOnce()
+  expect(monitor.view()).toMatchObject({ autoHandoffEnabled: true,
+    threads: [{ stage: 'failed', summary: '发布任务失败' }] })
+  expect(autoHandoff).toHaveBeenCalledTimes(1)
+  expect(autoHandoff.mock.calls[0]?.[0]).toMatchObject({ threadId: 'thread-a', itemId: 'answer-new-1',
+    summary: '发布任务失败' })
+  expect(monitor.view().threads[0]?.handoffTicketId).toBe('ticket-codex')
+  await monitor.scanOnce()
+  expect(autoHandoff).toHaveBeenCalledTimes(1)
+})
+
+it('does not hand off a historical failure when auto intake is enabled later', async () => {
+  const { monitor, autoHandoff, setDecision } = fixture()
+  monitor.setEnabled(true)
+  setDecision(JSON.stringify({ needsAttention: true, stage: 'failed', kind: 'failure',
+    reason: '旧进展报告失败', action: '检查失败', summary: '旧任务失败', evidence: '正在处理' }))
+  await monitor.scanOnce()
+  monitor.setAutoHandoff(true)
+  await monitor.scanOnce()
+  expect(autoHandoff).not.toHaveBeenCalled()
+})
+
+it('does not hand off an old failure if its assessment timestamp is refreshed without a new message', async () => {
+  const { store, monitor, autoHandoff, setDecision, advanceMinutes } = fixture()
+  monitor.setEnabled(true)
+  setDecision(JSON.stringify({ needsAttention: true, stage: 'failed', kind: 'failure',
+    reason: '旧进展报告失败', action: '检查失败', summary: '旧任务失败', evidence: '正在处理' }))
+  await monitor.scanOnce()
+  monitor.setAutoHandoff(true)
+  advanceMinutes(1)
+  const state = store.get('codex-monitor-v1') as { threads: Record<string, { assessment: { at: string } }> }
+  state.threads['thread-a']!.assessment.at = '2026-11-01T12:31:00.000Z'
+  store.set('codex-monitor-v1', state)
+  await monitor.scanOnce()
+  expect(autoHandoff).not.toHaveBeenCalled()
+})
+
+it('does not hand off a thread first discovered after enabling with an older update time', async () => {
+  const { monitor, autoHandoff, setDecision } = fixture()
+  monitor.setEnabled(true)
+  monitor.setAutoHandoff(true)
+  setDecision(JSON.stringify({ needsAttention: true, stage: 'failed', kind: 'failure',
+    reason: '旧进展报告失败', action: '检查失败', summary: '旧任务失败', evidence: '正在处理' }))
+  await monitor.scanOnce()
+  expect(autoHandoff).not.toHaveBeenCalled()
+})
 
 it('summarizes existing conversations and alerts on later assistant action', async () => {
   const { store, monitor, rpc, stream, requests, setPhase } = fixture()

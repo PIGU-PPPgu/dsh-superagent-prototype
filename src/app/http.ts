@@ -32,7 +32,7 @@ import { executorLoad, ticketDetail, ticketList } from './views/tickets.ts'
 
 export interface HttpHost {
   readonly codex?: { refresh(signal: AbortSignal): Promise<CodexObservation> }
-  readonly codexMonitor: Pick<CodexMonitor, 'view' | 'setEnabled' | 'acknowledge'>
+  readonly codexMonitor: Pick<CodexMonitor, 'view' | 'setEnabled' | 'setAutoHandoff' | 'acknowledge'>
   readonly store: Store
   /** Feishu message links resolved since startup, used by search to match AppLink URLs. */
   readonly sourceLinks: Pick<TextCache, 'entries'>
@@ -168,6 +168,8 @@ function routes(runtime: HttpHost): Routes {
     },
     'POST codex/monitor': async ({ body }) =>
       runtime.codexMonitor.setEnabled(z.object({ enabled: z.boolean() }).strict().parse(await body()).enabled),
+    'POST codex/auto-handoff': async ({ body }) =>
+      runtime.codexMonitor.setAutoHandoff(z.object({ enabled: z.boolean() }).strict().parse(await body()).enabled),
     'POST codex/attention/:id/ack': async ({ params, body }) => {
       const seen = z.object({ itemId: z.string().min(1).max(200), at: z.iso.datetime({ offset: true }) }).strict()
         .parse(await body())
