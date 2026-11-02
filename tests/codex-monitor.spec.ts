@@ -275,6 +275,18 @@ it('groups 31 child threads under one main conversation without 31 model calls',
   expect(requests.filter(method => method === 'thread/items/list')).toHaveLength(1)
 })
 
+it('distinguishes child threads without a parent ID from those whose parent is unavailable', async () => {
+  const { monitor, setLocalRows } = fixture()
+  setLocalRows([
+    { id: 'child-other', sourceKind: 'subAgentOther', archived: false },
+    { id: 'child-review', sourceKind: 'subAgentReview', archived: false },
+    { id: 'child-missing', sourceKind: 'subAgentThreadSpawn', parentThreadId: 'missing-root', archived: false },
+  ])
+  await monitor.scanOnce()
+  expect(monitor.view()).toMatchObject({ total: 1, childTotal: 3, unlinkedTotal: 3,
+    withoutParentTotal: 2, unresolvedParentTotal: 1 })
+})
+
 it('adds a main conversation found only in the local rollout inventory', async () => {
   const { monitor, stream, inventory, setLocalRows } = fixture()
   setLocalRows([{ id: 'disk-main', name: 'Older project', sourceKind: 'vscode',

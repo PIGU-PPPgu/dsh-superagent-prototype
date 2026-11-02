@@ -49,13 +49,15 @@ it('shows main conversation summaries and groups child threads', async () => {
   expect(server.requests.some(request => request.path.includes('codex?') && request.path.includes('scope=all'))).toBe(true)
 })
 
-it('does not describe unlinked child threads as grouped under a main conversation', async () => {
+it('shows why child threads cannot be grouped under a main conversation', async () => {
   server.codex = { enabled: true, total: 1, recentTotal: 1, childTotal: 28, unlinkedTotal: 27,
+    withoutParentTotal: 26, unresolvedParentTotal: 1,
     attentionTotal: 0, attention: [], threads: [{ id: 'thread-a', title: '发布任务',
       sourceKind: 'vscode', archived: false, present: true, childCount: 1 }] }
   await mount()
   await click(tab(zh['tab.codex']))
   expect(text()).toContain('1 个子线程归入主会话')
-  expect(text()).toContain('27 个未归属')
+  expect(text()).toContain('26 条无父会话记录')
+  expect(text()).toContain('1 条父会话未找到')
   expect(text()).not.toContain('28 个子线程归入主会话')
 })

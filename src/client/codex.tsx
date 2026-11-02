@@ -49,13 +49,19 @@ export function CodexPage() {
     {monitor?.enabled && <p className="dt-hint">{chinese
       ? '最近 7 天 ' + (monitor.recentTotal ?? monitor.total) + ' / 共 ' + monitor.total + ' 个主会话 · '
         + linkedChildren + ' 个子线程归入主会话'
-        + (monitor.unlinkedTotal ? ' · ' + monitor.unlinkedTotal + ' 个未归属' : '')
+        + (monitor.withoutParentTotal ? ' · ' + monitor.withoutParentTotal + ' 条无父会话记录' : '')
+        + (monitor.unresolvedParentTotal ? ' · ' + monitor.unresolvedParentTotal + ' 条父会话未找到' : '')
+        + (monitor.withoutParentTotal === undefined && monitor.unresolvedParentTotal === undefined
+          && monitor.unlinkedTotal ? ' · ' + monitor.unlinkedTotal + ' 个未归属' : '')
         + (monitor.unclassifiedTotal ? ' · ' + monitor.unclassifiedTotal + ' 条来源未识别' : '')
         + ' · 上次扫描 ' + timeText(monitor.scannedAt, true)
         + ' · 历史观察'
       : 'Last 7 days: ' + (monitor.recentTotal ?? monitor.total) + ' / ' + monitor.total + ' main conversations · '
         + linkedChildren + ' child threads grouped'
-        + (monitor.unlinkedTotal ? ' · ' + monitor.unlinkedTotal + ' unlinked' : '')
+        + (monitor.withoutParentTotal ? ' · ' + monitor.withoutParentTotal + ' without parent ID' : '')
+        + (monitor.unresolvedParentTotal ? ' · ' + monitor.unresolvedParentTotal + ' parent not found' : '')
+        + (monitor.withoutParentTotal === undefined && monitor.unresolvedParentTotal === undefined
+          && monitor.unlinkedTotal ? ' · ' + monitor.unlinkedTotal + ' unlinked' : '')
         + (monitor.unclassifiedTotal ? ' · ' + monitor.unclassifiedTotal + ' unclassified' : '')
         + ' · scanned ' + timeText(monitor.scannedAt, false)
         + ' · stored history'}</p>}

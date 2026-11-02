@@ -48,6 +48,8 @@ interface StoredMonitor {
   inventoryChildTotal?: number
   inventoryUnclassifiedTotal?: number
   inventoryUnlinkedTotal?: number
+  inventoryWithoutParentTotal?: number
+  inventoryUnresolvedParentTotal?: number
 }
 export interface CodexMonitorThreadView {
   id: string
@@ -76,6 +78,8 @@ export interface CodexMonitorView {
   childTotal?: number
   archivedTotal?: number
   unlinkedTotal?: number
+  withoutParentTotal?: number
+  unresolvedParentTotal?: number
   unclassifiedTotal?: number
   recentTotal?: number
   attentionTotal: number
@@ -123,9 +127,11 @@ function combineInventory(local: readonly MonitoredCodexThread[], rpc: readonly 
 function childCounts(rows: readonly MonitoredCodexThread[]) {
   const byId = new Map(rows.map(row => [row.id, row]))
   const stats: Record<string, { count: number; lastAt?: string }> = {}
-  let unlinked = 0
+  let withoutParent = 0
+  let unresolvedParent = 0
   for (const row of rows.filter(isChild)) {
-    let parent = row.parentThreadId
+    if (!row.parentThreadId) { withoutParent++; continue }
+    let parent: string | undefined = row.parentThreadId
     const visited = new Set([row.id])
     while (parent && !visited.has(parent)) {
       const found = byId.get(parent)
@@ -133,12 +139,12 @@ function childCounts(rows: readonly MonitoredCodexThread[]) {
       visited.add(parent)
       parent = found.parentThreadId
     }
-    if (!parent || !byId.has(parent) || !isMain(byId.get(parent)!)) { unlinked++; continue }
+    if (!parent || !byId.has(parent) || !isMain(byId.get(parent)!)) { unresolvedParent++; continue }
     const current = stats[parent] ?? { count: 0 }
     stats[parent] = { count: current.count + 1, ...(maxTime(current.lastAt, row.updatedAt)
       ? { lastAt: maxTime(current.lastAt, row.updatedAt) } : {}) }
   }
-  return { stats, unlinked }
+  return { stats, unlinked: withoutParent + unresolvedParent, withoutParent, unresolvedParent }
 }
 
 /** The monitor never resumes, subscribes to, messages, or interrupts a Codex thread. */
@@ -196,6 +202,10 @@ export class CodexMonitor {
       archivedTotal: roots.filter(row => row.archived).length,
       recentTotal: recent.length,
       unlinkedTotal: state.inventoryUnlinkedTotal ?? 0,
+      ...(state.inventoryWithoutParentTotal !== undefined
+        ? { withoutParentTotal: state.inventoryWithoutParentTotal } : {}),
+      ...(state.inventoryUnresolvedParentTotal !== undefined
+        ? { unresolvedParentTotal: state.inventoryUnresolvedParentTotal } : {}),
       unclassifiedTotal: state.inventoryUnclassifiedTotal ?? present.filter(row => row.sourceKind === 'unknown').length,
       attentionTotal: attention.length,
       attention: attention.slice(0, 50).map(display), threads: shown.slice(offset, offset + limit).map(display),
@@ -286,7 +296,7 @@ export class CodexMonitor {
           present: true, baselined: previous?.baselined ?? false,
           ...(!previous?.baselined ? { suppressBaselineAlert: true } : {}) }
       }
-      const { stats, unlinked } = childCounts(discovered)
+      const { stats, unlinked, withoutParent, unresolvedParent } = childCounts(discovered)
       this.save({ ...current, threads,
         childStats: inventoryError ? current.childStats : stats,
         inventoryTotal: inventoryError ? current.inventoryTotal : discovered.length,
@@ -294,6 +304,8 @@ export class CodexMonitor {
         inventoryUnclassifiedTotal: inventoryError ? current.inventoryUnclassifiedTotal
           : discovered.filter(row => row.sourceKind === 'unknown').length,
         inventoryUnlinkedTotal: inventoryError ? current.inventoryUnlinkedTotal : unlinked,
+        inventoryWithoutParentTotal: inventoryError ? current.inventoryWithoutParentTotal : withoutParent,
+        inventoryUnresolvedParentTotal: inventoryError ? current.inventoryUnresolvedParentTotal : unresolvedParent,
         ...(inventoryError ? { error: inventoryError } : {}) })
       const recentRoots = discovered.filter(row => isMain(row) && !row.archived && row.updatedAt
         && Date.parse(row.updatedAt) >= recentCutoff)
