@@ -20,11 +20,13 @@ interface Paged { offset?: number; limit?: number }
 type Delivery = 'injected' | 'pending'
 
 export interface Api {
-  'GET codex': { query?: Paged; response: { configured: boolean; observation?: CodexObservation; monitor: CodexMonitorView } }
+  'GET codex': { query?: Paged & { scope?: 'recent' | 'all' };
+    response: { configured: boolean; observation?: CodexObservation; monitor: CodexMonitorView } }
   'POST codex/monitor': { body: { enabled: boolean }; response: CodexMonitorView }
   'POST codex/attention/:id/ack': { body: { itemId: string; at: string }; response: CodexMonitorView }
   'GET state': { response: StateView }
-  'GET overview': { response: OverviewView & { codexAttention?: number } }
+  'GET overview': { response: OverviewView & { codexAttention?: number;
+    codexItems?: { id: string; title: string; reason: string; action: string }[] } }
   'GET search': { query: { q: string }; response: SearchView }
   'GET sources': { response: SourceStatusView[] }
   'GET settings': { response: SettingsView }

@@ -183,6 +183,10 @@ const overviewView = (): ApiResponse<'GET overview'> => {
   const setup = problem ?? feishuProblem
   return {
     codexAttention: server.codex.attentionTotal,
+    codexItems: server.codex.attention.slice(0, 3).map(thread => ({
+      id: thread.id, title: thread.title, reason: thread.attention?.decision.reason ?? '',
+      action: thread.attention?.decision.action ?? '',
+    })),
     problems: [...setup ? [{ kind: 'setup' as const, ...setup }] : [],
       ...KINDS.some(kind => server.settings.sources[kind.kind]?.enabled !== false) ? [] : [{ kind: 'no-source' as const }],
       ...feishuProblem || server.settings.sources.feishu?.enabled === false ? [] : [{ kind: 'source-error' as const, source: { id: 'feishu',
@@ -295,7 +299,7 @@ const ticketOf = (id: string) =>
 const SourceSave = z.object({ enabled: z.boolean(), config: z.unknown() })
 
 const ROUTES: { [K in keyof Api]: Route<K> } = {
-  'GET codex': { query: ['offset', 'limit'], answer: () => ({ configured: false, monitor: server.codex }) },
+  'GET codex': { query: ['offset', 'limit', 'scope'], answer: () => ({ configured: false, monitor: server.codex }) },
   'POST codex/monitor': { body: true, answer: ({ body }) => {
     server.codex = { ...server.codex, enabled: body.enabled }
     return server.codex

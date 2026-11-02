@@ -59,6 +59,30 @@ it('registers a localized main panel, sidebar entry and Plugin Manager row page,
   expect(nav.options.label?.()).toBe('Superagent')
 })
 
+it('shows an attention dot on the Superagent sidebar icon', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => Response.json({ monitor: { attentionTotal: 2 } })))
+  const { nav } = fixture([])
+  const view = await render(nav, { size: 24 })
+  expect(view.container.querySelector('svg circle')).not.toBeNull()
+  view.dispose()
+})
+
+it('serializes sidebar attention refreshes so an older request cannot replace a newer result', async () => {
+  const replies: ((response: Response) => void)[] = []
+  const fetch = vi.fn(() => new Promise<Response>(resolve => { replies.push(resolve) }))
+  vi.stubGlobal('fetch', fetch)
+  const { nav } = fixture([])
+  const view = await render(nav, { size: 24 })
+  expect(fetch).toHaveBeenCalledTimes(1)
+  await act(async () => { document.dispatchEvent(new Event('visibilitychange')) })
+  expect(fetch).toHaveBeenCalledTimes(1)
+  await act(async () => { replies[0]!(Response.json({ monitor: { attentionTotal: 2 } })) })
+  expect(fetch).toHaveBeenCalledTimes(2)
+  await act(async () => { replies[1]!(Response.json({ monitor: { attentionTotal: 0 } })) })
+  expect(view.container.querySelector('svg circle')).toBeNull()
+  view.dispose()
+})
+
 it('opens a listed Session through the workspace from the main panel', async () => {
   serve()
   const { ctx, main } = fixture(['master'])

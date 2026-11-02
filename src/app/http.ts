@@ -158,7 +158,8 @@ function routes(runtime: HttpHost): Routes {
   const promptBody = (input: { body: (maxBytes?: number) => Promise<unknown> }) => input.body(4 * runtime.machine.promptMaxChars.get() + 4096)
   return {
     'GET codex': async ({ query }) => {
-      const monitor = runtime.codexMonitor.view(offset.parse(query.offset), limit(50, 100).parse(query.limit))
+      const monitor = runtime.codexMonitor.view(offset.parse(query.offset), limit(20, 100).parse(query.limit),
+        z.enum(['recent', 'all']).catch('recent').parse(query.scope))
       return monitor.enabled || !runtime.codex ? { configured: !!runtime.codex, monitor }
         : { configured: true, monitor, observation: await runtime.codex.refresh(new AbortController().signal) }
     },
@@ -176,7 +177,9 @@ function routes(runtime: HttpHost): Routes {
         executorLoad(store, runtime.executor.activeCount()), runtime.setupProblem ?? runtime.feishuProblem)
       return { ...page, problems: monitor.enabled ? page.problems.filter(problem =>
         problem.kind !== 'no-source' && problem.kind !== 'no-allowed') : page.problems,
-        codexAttention: monitor.attentionTotal }
+        codexAttention: monitor.attentionTotal,
+        codexItems: monitor.attention.slice(0, 3).map(thread => ({ id: thread.id, title: thread.title,
+          reason: thread.attention?.decision.reason ?? '', action: thread.attention?.decision.action ?? '' })) }
     },
     'GET search': ({ query }) => search(views(runtime), query.q ?? '', runtime.sourceLinks),
     'GET sources': () => sourcesStatus(views(runtime), runtime.health, setupState(runtime)),

@@ -77,10 +77,15 @@ export function OverviewPage() {
         onChanged={reload} />)}</ul>
         : <Hint>{t('needsYouNone')}</Hint>}
     </Section>
-    {(data.codexAttention ?? 0) > 0 && <Section title={t('tab.codex')} count={data.codexAttention}>
-      <Button variant="outline" size="sm" onClick={() => navigate({ page: 'codex' })}>
-        {t('details')}
-      </Button>
+    {(data.codexAttention ?? 0) > 0 && <Section title={t('tab.codex')} count={data.codexAttention}
+      action={more({ page: 'codex' })}>
+      <ul className="dt-list dt-cards">{(data.codexItems ?? []).map(item => <li className="dt-row dt-link" key={item.id}>
+        <div className="dt-row-main">
+          <div className="dt-row-title"><button type="button" className="dt-open dt-open-wrap"
+            onClick={() => navigate({ page: 'codex' })}>{item.title}</button></div>
+          <p className="dt-row-quote dt-clamp">{item.action || item.reason}</p>
+        </div>
+      </li>)}</ul>
     </Section>}
     {data.problems.length > 0 && <Section title={t('problems')} count={data.problems.length}>
       <ul className="dt-list dt-cards">{data.problems.map((problem, index) => <ProblemLine key={index} problem={problem}

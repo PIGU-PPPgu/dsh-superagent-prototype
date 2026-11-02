@@ -11,6 +11,7 @@ import type { PluginConfigViewProps } from '@deepseek-ai/dsh-client-ui-plugin-ma
 import type { ISessions } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { openKnownSession, SessionNavigationError } from '../navigation.ts'
+import { usePoll } from './api.ts'
 import { App } from './app.tsx'
 import { PluginConfig, usePageForm } from './deployment.tsx'
 import { en, zh } from './locales.ts'
@@ -22,8 +23,16 @@ const PANEL_ID = 'dsh-superagent' as MainPanelId
 const ENTRY = 'dsh-superagent'
 
 function HammerIcon({ size }: SidebarPanelIconOwnerProps) {
+  const { data } = usePoll(async () => {
+    const response = await fetch('/orchestrator/api/codex',
+      { headers: { 'x-orchestrator-request': '1' } })
+    if (!response.ok) throw new Error('Codex monitor unavailable')
+    return response.json() as Promise<{ monitor?: { attentionTotal?: number } }>
+  }, [], 30_000)
+  const attention = Math.max(0, data?.monitor?.attentionTotal ?? 0)
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
     <path d="M6 3.5h9l3.5 1.75v2.5L15 9.5H6a1 1 0 0 1-1-1v-4a1 1 0 0 1 1-1z" /><path d="M10 9.5v10.25a1.75 1.75 0 0 0 3.5 0V9.5" /><path d="M10 15.5h3.5" />
+    {attention > 0 && <circle cx="20" cy="4" r="3" fill="var(--dsw-alias-state-warn-primary)" stroke="none" />}
   </svg>
 }
 

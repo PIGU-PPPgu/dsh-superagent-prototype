@@ -322,6 +322,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/codex/export.ts` | One-shot history-only snapshot exporter with atomic private-file replacement |
 | `src/codex/discovery.ts` | Bounded local-only discovery of stored Codex thread IDs for the operator's allowlist |
 | `src/codex/monitor-read.ts` | Read-only pagination of all locally indexed Codex threads and bounded new user/agent messages |
+| `src/codex/local-inventory.ts` | Read-only rollout file discovery joined with the local Codex state index |
 | `src/codex/triage.ts` | Bounded model input and strict attention decision parsing for changed Codex messages |
 | `src/codex/local.ts` | Loopback-only dashboard server and private local allowlist editor |
 | `src/codex/local-ui.ts` | Self-contained local dashboard HTML, CSS and browser code |
@@ -426,6 +427,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/codex-read.spec.ts` | Codex whitelist, read-only RPC projection, unknown live state, progress deduplication and DSH main tool integration |
 | `tests/codex-local.spec.ts` | Mac-local loopback dashboard, discovery, private file and allowlist boundaries |
 | `tests/codex-monitor-read.spec.ts` | All-source and archived discovery, bounded incremental Codex message reads |
+| `tests/codex-local-inventory.spec.ts` | Filesystem and SQLite inventory, source normalization and path boundaries |
 | `tests/codex-triage.spec.ts` | Bounded untrusted model input and strict attention output |
 | `tests/codex-monitor.spec.ts` | Baseline, changed-message triage, acknowledgement, restart and failed-read retry |
 | `tests/commands.spec.ts` | CLI calls as the deployment's accounts, the Channels' answers, and repository-scoped GitHub calls |
