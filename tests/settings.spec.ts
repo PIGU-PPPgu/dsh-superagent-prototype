@@ -1,6 +1,7 @@
 /** Concurrency, retry, and validation tests for settings saves, pause toggling, and policy synchronization. */
 import { afterEach, expect, it, vi } from 'vitest'
-import { UserError } from '../src/core/index.ts'
+import { UserError, type Ticket } from '../src/core/index.ts'
+import { issueTrigger } from '../src/sources/github-trigger.ts'
 import { Commands } from '../src/infra/commands.ts'
 import { Setup } from '../src/app/setup.ts'
 import { SettingsConflict } from '../src/app/settings.ts'
@@ -39,6 +40,31 @@ it('refuses a save of a block that another save changed during its model or acco
   accounts.resolve()
   await expect(moved).rejects.toThrow(SettingsConflict)
   expect(store.settings().sources.github!.config).toMatchObject({ cli: value.config.cli, pollSeconds: 90 })
+})
+
+it('keeps the account and repository of a binding with an open ticket', async () => {
+  h = await startRuntime()
+  const { settings, store } = h.runtime
+  const current = store.settings()
+  const github = current.sources.github!
+  const bindings = [{ id: 'other', repository: 'acme/other', cli: '/path/other-gh' }]
+  store.saveSettings({ ...current, sources: { ...current.sources,
+    github: { ...github, config: { ...github.config, bindings } } } })
+  const source = issueTrigger({ number: 7, title: 'Fix', body: 'Please fix', user: { login: 'alice' },
+    created_at: '2026-09-01T00:00:00Z', html_url: 'https://github.com/acme/other/issues/7' }, 'other-agent', 'other')
+  store.triggers.save(source)
+  store.tickets.save({ id: 't-other', title: 'Fix', decisionId: 'd',
+    mandate: { strength: 'explicit', policyVersion: '', basis: { via: 'listed' }, actor: source.actor, scope: '' },
+    channels: [source.channel!], assignments: [], inputs: [], undelivered: [], createdAt: '', updatedAt: '',
+    origin: { triggerId: source.id, triggerIds: [source.id] } } as Ticket)
+  const revision = store.blockRevision('source:github')
+  const value = settings.block('source:github').value as { enabled: boolean; config: Record<string, unknown> }
+  await expect(settings.save('source:github', { ...value, config: { ...value.config, bindings: [] } }, revision, 'panel'))
+    .rejects.toMatchObject({ code: 'githubBindingInUse' })
+  await expect(settings.save('source:github', { ...value, config: { ...value.config,
+    bindings: [{ ...bindings[0]!, cli: '/path/new-gh' }] } }, revision, 'panel'))
+    .rejects.toMatchObject({ code: 'githubBindingInUse' })
+  expect(store.settings().sources.github!.config.bindings).toEqual(bindings)
 })
 
 it('refuses a Policy sync that a Policy save outran, reports it on sync:feishu, and keeps the save', async () => {

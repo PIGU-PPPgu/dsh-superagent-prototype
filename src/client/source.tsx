@@ -21,7 +21,7 @@ function SourceCard({ source }: { source: SourceView }) {
   const draft = useBlockDraft(`source:${source.id}`, source.value, source.revision)
   const value = draft.value
   const { problem, value: saved } = source
-  const changed = (key: string) => String(value.config[key] ?? '') !== String(saved.config[key] ?? '')
+  const changed = (key: string) => JSON.stringify(value.config[key] ?? '') !== JSON.stringify(saved.config[key] ?? '')
   // Saving a modified setup-sensitive field restarts dsh-superagent, interrupting running Assignments.
   const restarts = draft.dirty && source.restarts.some(changed)
   const description = localized(t, source.description)

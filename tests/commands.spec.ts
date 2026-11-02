@@ -47,6 +47,19 @@ describe('account-isolated operations', () => {
     await expect(new Commands(() => deployment, {}, new AbortController().signal).pages(z.unknown(),
       '../../someone/else/issues')).rejects.toThrow()
   })
+  it('routes a bound reply through its own account and repository', async () => {
+    const multi = testDeployment({ githubBindings: { other: { repository: 'acme/other', github: {
+      cli: '/path/other-gh', login: 'other-agent', noreply: '8+other-agent@users.noreply.github.com' } } } })
+    const run = vi.spyOn(Commands.prototype, 'run').mockImplementation(async (_program, args) =>
+      args.includes('--paginate') ? '[]' : '{}')
+    try {
+      await send(new Commands(() => multi, {}, new AbortController().signal),
+        { ...reply, channel: githubChannel(8, undefined, 'other') })
+      expect(run.mock.calls.every(([program]) => program === '/path/other-gh')).toBe(true)
+      expect(run.mock.calls.some(([, args]) => args.includes('repos/acme/other/issues/8/comments'))).toBe(true)
+      expect(run.mock.calls.some(([, args]) => args.includes(`repos/${REPOSITORY}/issues/8/comments`))).toBe(false)
+    } finally { run.mockRestore() }
+  })
   it('routes review-comment replies to the root review comment', async () => {
     const commands = new Commands(() => deployment, {}, new AbortController().signal); vi.spyOn(commands,'pages').mockResolvedValue([])
     const gh = vi.spyOn(commands,'gh').mockResolvedValueOnce({ id: 7, in_reply_to_id: 3 }).mockResolvedValueOnce({})
@@ -121,6 +134,9 @@ describe('Channels', () => {
     expect(githubKind.channel!.link(githubChannel(8, review).address, links))
       .toEqual({ url: review, label: { zh: 'GitHub #8 的 review 讨论', en: 'Review discussion on GitHub #8' } })
     expect(githubKind.channel!.link(githubChannel(8).address, {}).url).toBe('')
+    expect(githubKind.channel!.link(githubChannel(8, undefined, 'other').address,
+      { repository: REPOSITORY, githubBindings: { other: { repository: 'acme/other', github: deployment.github } } }).url)
+      .toBe('https://github.com/acme/other/issues/8')
     const message = feishuChannel('oc_1', 'om_1').address
     expect(feishuKind.channel!.link(message, links)).toEqual({ url: 'https://applink.feishu.cn/client/chat/open?openChatId=oc_1',
       label: { zh: '飞书消息', en: 'Feishu message' }, triggerId: key('feishu', 'om_1') })
@@ -129,6 +145,18 @@ describe('Channels', () => {
 
 describe('GitHub calls', () => {
   const commands = () => new Commands(() => deployment, {}, new AbortController().signal)
+  it('uses the selected account and confines its requests to the selected repository', async () => {
+    const multi = testDeployment({ githubBindings: { other: { repository: 'acme/other', github: {
+      cli: '/path/other-gh', login: 'other-agent', noreply: '8+other-agent@users.noreply.github.com' } } } })
+    const base = new Commands(() => multi, {}, new AbortController().signal)
+    const selected = base.forBinding('other').withSignal(new AbortController().signal)
+    const run = vi.spyOn(selected, 'run').mockResolvedValue('{}')
+    await selected.api('issues/8')
+    expect(run).toHaveBeenCalledWith('/path/other-gh', ['api', 'repos/acme/other/issues/8'])
+    await expect(selected.api('../widgets/issues/8')).rejects.toThrow('restricted to the configured repository')
+    expect(() => base.forBinding('missing').repository).toThrow('unavailable')
+    expect(base.repository).toBe(multi.repository)
+  })
   it('go only to paths inside the configured repository, and validate what GitHub answers', async () => {
     const value = commands()
     const run = vi.spyOn(value, 'run').mockResolvedValue('{"number":12,"title":"Login fails","extra":true}')

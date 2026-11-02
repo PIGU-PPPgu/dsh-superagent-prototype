@@ -206,7 +206,22 @@ const ROUTES: readonly Route[] = [
     const commands = read.host.commands.withSignal(read.signal)
     return sourcePage(read, 'feishu', () => feishuRead(commands, ref, read.resource, read.host.feishuPageSize()))
   }],
-  ['github/', read => sourcePage(read, 'github', () => readGithub(read.host.commands.withSignal(read.signal), read.resource))],
+  ['github/', read => sourcePage(read, 'github', async () => {
+    const bindings = read.host.commands.deployment.githubBindings ?? {}
+    const first = read.rest.split('/')[0]!
+    const explicit = Object.hasOwn(bindings, first) ? first : undefined
+    const ticket = read.ticketId ? read.host.store.tickets.get(read.ticketId) : undefined
+    const origin = ticket && read.host.store.triggers.get(ticket.origin.triggerId)
+    const owned = origin?.source === 'github' && typeof origin.meta.bindingId === 'string' ? origin.meta.bindingId : undefined
+    if (read.ticketId && explicit && explicit !== owned) throw new Error('GitHub binding does not belong to this worker')
+    const bindingId = explicit ?? owned
+    const resource = explicit ? `github/${read.rest.slice(explicit.length + 1)}` : read.resource
+    const base = read.host.commands.withSignal(read.signal)
+    const result = await readGithub(bindingId ? base.forBinding(bindingId) : base, resource)
+    if (!bindingId || read.ticketId || !result || typeof result !== 'object' || !('next_resource' in result)
+      || typeof result.next_resource !== 'string') return result
+    return { ...result, next_resource: result.next_resource.replace(/^github\//, `github/${bindingId}/`) }
+  })],
   ['trigger/', async read => {
     const { host, rest, ticketId, offset, signal } = read
     if (!rest || rest.includes('/')) throw new Error('Unknown context resource')

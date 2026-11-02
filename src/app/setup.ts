@@ -14,7 +14,8 @@ export interface SetupHost {
 }
 
 const setupFields = (settings: Settings) =>
-  JSON.stringify(Object.entries(SETUP_FIELDS).map(([id, keys]) => keys.map(key => settings.sources[id]?.config[key] ?? '')))
+  JSON.stringify(Object.entries(SETUP_FIELDS).map(([id, keys]) => keys.map(key =>
+    settings.sources[id]?.config[key] ?? (key === 'bindings' ? [] : ''))))
 export const setupChanged = (before: Settings, after: Settings): boolean => setupFields(before) !== setupFields(after)
 
 /**
@@ -77,6 +78,9 @@ export class Setup {
     const { context, machine, lifetime } = this.host
     const probe = this.probe()
     const deployment = await resolveDeployment(machine, settings.sources.github?.config, probe)
+    if (Object.keys(deployment.githubBindings ?? {}).length && !context.get('shellEnv')) {
+      throw new SetupError('environmentFailed', { output: 'Multiple GitHub accounts require the DSH shell-env service.' })
+    }
     const feishu = await resolveFeishuBot(machine, settings.sources.feishu?.config, probe).catch((error: unknown) => {
       if (!(error instanceof SetupError)) throw error
       this.feishuProblem = error.problem

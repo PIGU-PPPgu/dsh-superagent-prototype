@@ -358,6 +358,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/tools/main.ts` | The main Session's tools |
 | `src/app/tools/executor.ts` | An Executor Session's tools |
 | `src/app/http.ts` | The `/orchestrator/api` routes: the same-origin check, request limits and one status per kind of failure |
+| `src/app/github-shell-env.ts` | Per-Session GitHub binding passed to DSH shell tools through a managed environment variable |
 | `src/app/api.ts` | `Api`, every route with its parameters, query, body and response, and the filters of the lists; it imports only types, so the panel bundles it |
 | `src/app/views/text.ts` | The two forms of a view's text: `preview`, plain text on one line, and `markdown` without HTML; `plain` and `readable` |
 | `src/app/views/records.ts` | The rows the views share: Triggers, Tickets, Threads, Decisions and Channel links, and `ownersOf`, the owners of follow-ups as one request reads them |
@@ -378,6 +379,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/host.ts` | `SourceHost`, `SourceContext`, `Health`, `health` and the fixed health texts |
 | `src/sources/poll.ts` | What GitHub and Feishu polling share: `POLL_HORIZON_MS`, `polled`, `cursorAt`, and `pollThreads`, which keeps a failure on its Thread as `pollError` |
 | `src/sources/github.ts` | The GitHub kind and plugin entry, exported as `./github-watch`: a poll round of notifications, the pull requests of open Tickets with their CI, and subscribed Threads |
+| `src/sources/github-binding.ts` | Scoped GitHub context for each repository's CLI, cursors, threads and tickets |
 | `src/sources/github-trigger.ts` | GitHub comments, reviews, Issue bodies and CI changes as Triggers, and GitHub addresses |
 | `src/sources/github-pull.ts` | The pull request rules: which pull requests a Ticket follows (`claimPull`, `observePull`), the closes it reports to the Engine, and `pullEndNotices`, the chat notice of a Ticket that ended merged or closed |
 | `src/sources/github-channel.ts` | The GitHub Channel: comments and review thread replies, `sent` or `gone` |
@@ -431,6 +433,10 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/codex-triage.spec.ts` | Bounded untrusted model input and strict attention output |
 | `tests/codex-monitor.spec.ts` | Baseline, changed-message triage, acknowledgement, restart and failed-read retry |
 | `tests/commands.spec.ts` | CLI calls as the deployment's accounts, the Channels' answers, and repository-scoped GitHub calls |
+| `tests/github-binding.spec.ts` | GitHub binding isolation for commands, cursors, threads and tickets |
+| `tests/github-shell-env.spec.ts` | DSH worker and subagent shell calls use their ticket's GitHub binding |
+| `tests/github-resource-binding.spec.ts` | Worker GitHub resource reads stay inside the ticket's repository binding |
+| `tests/github-trigger.spec.ts` | Binding-specific GitHub Trigger and Thread IDs preserve the legacy primary IDs |
 | `tests/feishu-read.spec.ts`, `tests/github-read.spec.ts` | Feishu and GitHub reads |
 | `tests/admission-context.spec.ts`, `tests/feishu-image.spec.ts` | The Thread window of assessments, and Feishu image reads |
 | `tests/assessment.spec.ts` | What the MasterAssessor keeps per Eval, and when it lets go |

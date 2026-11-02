@@ -17,7 +17,8 @@ const LEGACY_MARKERS = ['dsh-tag', 'dsh-go', 'dsh-freelancer'].map(name => `# Wr
 /** Commands workers need, which `blockedCommands` cannot block: the shims and git. */
 export const WORKER_COMMANDS: readonly string[] = ['gh', 'git', 'lark-cli']
 export const workerBin = (stateDir: string): string => join(stateDir, 'worker-bin')
-export const workerGitConfig = (stateDir: string): string => join(stateDir, 'worker-gitconfig')
+export const workerGitConfig = (stateDir: string, bindingId?: string): string =>
+  join(stateDir, bindingId ? `worker-gitconfig-${bindingId}` : 'worker-gitconfig')
 const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`
 const gitQuote = (value: string): string => `"${value.replace(/[\\"]/g, char => `\\${char}`)}"`
 export const credentialHelper = (cli: string): string => `!${shellQuote(cli)} auth git-credential`
@@ -44,7 +45,7 @@ export const GIT_LOCATION: readonly string[] = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT
  */
 export function agentVariables(stateDir: string): Record<string, string | undefined> {
   return {
-    GH_TOKEN: undefined, GITHUB_TOKEN: undefined,
+    GH_TOKEN: undefined, GITHUB_TOKEN: undefined, GH_CONFIG_DIR: undefined,
     // A worker's git finds the repository from its directory, never from the host's environment.
     ...Object.fromEntries(GIT_LOCATION.map(name => [name, undefined])),
     GIT_CONFIG_GLOBAL: workerGitConfig(stateDir), GIT_CONFIG_NOSYSTEM: '1',
@@ -76,8 +77,9 @@ async function own(file: string, text: string, mode = 0o644): Promise<void> {
  * Atomically writes worker CLI shims and the isolated git configuration file into the state directory, refusing to overwrite foreign files.
  * Each shim strips the shim directory from PATH before exec so wrapper scripts resolving `gh` or `lark-cli` by name reach the real binary.
  */
-export async function writeEnvironment(deployment: Pick<Deployment, 'stateDir' | 'repository' | 'github' | 'feishu'>, blockedCommands: readonly string[]): Promise<void> {
-  const { stateDir, repository, github, feishu } = deployment
+export async function writeEnvironment(deployment: Pick<Deployment, 'stateDir' | 'repository' | 'github' | 'githubBindings' | 'feishu'>,
+  blockedCommands: readonly string[]): Promise<void> {
+  const { stateDir, github, feishu } = deployment
   const dir = workerBin(stateDir)
   await mkdir(dir, { recursive: true })
   const before = await readdir(dir)
@@ -97,22 +99,34 @@ export async function writeEnvironment(deployment: Pick<Deployment, 'stateDir' |
   ].join('\n')
   const run = (program: string): string => `${withoutShims}\nexec ${shellQuote(program)} "$@"`
   const fail = (message: string): string => `echo ${shellQuote(message)} >&2\nexit 1`
-  await shim('gh', run(github.cli))
+  const bindings = Object.entries(deployment.githubBindings ?? {})
+  const select = [
+    'binding=${DSH_SUPERAGENT_GITHUB_BINDING:-default}',
+    'case "$binding" in',
+    `default) target=${shellQuote(github.cli)}; git_config=${shellQuote(workerGitConfig(stateDir))} ;;`,
+    ...bindings.map(([id, value]) => `${shellQuote(id)}) target=${shellQuote(value.github.cli)}; git_config=${shellQuote(workerGitConfig(stateDir, id))} ;;`),
+    "*) echo 'GitHub binding is unavailable' >&2; exit 1 ;;",
+    'esac',
+  ].join('\n')
+  await shim('gh', `${withoutShims}\n${select}\nexec "$target" "$@"`)
+  await shim('git', `${withoutShims}\n${select}\nGIT_CONFIG_GLOBAL=$git_config; export GIT_CONFIG_GLOBAL\nexec git "$@"`)
   await shim('lark-cli', feishu ? run(feishu.cli) : fail('lark-cli is unavailable: this installation has no Feishu bot.'))
   for (const name of new Set(blockedCommands.filter(name => !WORKER_COMMANDS.includes(name)))) {
     await shim(name, fail(`${name} is blocked in this installation; use gh, which acts as ${github.login}.`))
   }
   for (const name of before) if (!kept.has(name)) await unlink(join(dir, name))
-  await own(workerGitConfig(stateDir), [
-    MARKER,
-    // Make git refuse to commit without an explicit identity set by the worker instead of guessing from the operator's OS user.
-    '[user]', '\tuseConfigOnly = true',
-    '[credential]', '\thelper =',
-    '[credential "https://github.com"]', `\thelper = ${gitQuote(credentialHelper(github.cli))}`,
-    '[url "https://github.com/"]', '\tinsteadOf = git@github.com:', '\tinsteadOf = ssh://git@github.com/',
-    // Include Git LFS filters because the operator's global gitconfig (which usually holds them) is ignored.
-    '[filter "lfs"]', '\tclean = git-lfs clean -- %f', '\tsmudge = git-lfs smudge -- %f', '\tprocess = git-lfs filter-process', '\trequired = true',
-  ].join('\n') + '\n')
+  for (const [id, account] of [[undefined, github], ...bindings.map(([id, value]) => [id, value.github] as const)] as const) {
+    await own(workerGitConfig(stateDir, id), [
+      MARKER,
+      // Make git refuse to commit without an explicit identity set by the worker instead of guessing from the operator's OS user.
+      '[user]', '\tuseConfigOnly = true',
+      '[credential]', '\thelper =',
+      '[credential "https://github.com"]', `\thelper = ${gitQuote(credentialHelper(account.cli))}`,
+      '[url "https://github.com/"]', '\tinsteadOf = git@github.com:', '\tinsteadOf = ssh://git@github.com/',
+      // Include Git LFS filters because the operator's global gitconfig (which usually holds them) is ignored.
+      '[filter "lfs"]', '\tclean = git-lfs clean -- %f', '\tsmudge = git-lfs smudge -- %f', '\tprocess = git-lfs filter-process', '\trequired = true',
+    ].join('\n') + '\n')
+  }
 }
 
 /** Applies environment overrides and prepends worker shims to `process.env.PATH`, returning a restore callback. */
@@ -135,11 +149,19 @@ export async function runAsWorker(subprocess: SubprocessRuntime, argv: string[],
 }
 
 /** Verifies that worker git invocations resolve the deployment's GitHub credential helper. */
-export async function verifyEnvironment(deployment: Pick<Deployment, 'github' | 'stateDir'>, subprocess: SubprocessRuntime, signal: AbortSignal): Promise<void> {
+export async function verifyEnvironment(deployment: Pick<Deployment, 'github' | 'githubBindings' | 'stateDir'>,
+  subprocess: SubprocessRuntime, signal: AbortSignal): Promise<void> {
   const { github, stateDir } = deployment
-  // `-z` separates fields with NUL and never quotes paths.
-  const helpers = (await runAsWorker(subprocess, ['git', 'config', '-z', '--show-origin', '--get-all', 'credential.https://github.com.helper'], stateDir, AbortSignal.any([signal, AbortSignal.timeout(60_000)])).catch(() => '')).split('\0')
-  if (helpers.join('\0') !== [`file:${workerGitConfig(stateDir)}`, credentialHelper(github.cli), ''].join('\0')) throw new SetupError('gitTooOld')
+  for (const [id, account] of [[undefined, github], ...Object.entries(deployment.githubBindings ?? {})
+    .map(([id, value]) => [id, value.github] as const)] as const) {
+    // `-z` separates fields with NUL and never quotes paths.
+    const helpers = (await runAsWorker(subprocess, ['git', 'config', '-z', '--show-origin', '--get-all',
+      'credential.https://github.com.helper'], stateDir, AbortSignal.any([signal, AbortSignal.timeout(60_000)]),
+    { DSH_SUPERAGENT_GITHUB_BINDING: id ?? 'default' }).catch(() => '')).split('\0')
+    if (helpers.join('\0') !== [`file:${workerGitConfig(stateDir, id)}`, credentialHelper(account.cli), ''].join('\0')) {
+      throw new SetupError('gitTooOld')
+    }
+  }
 }
 
 /**

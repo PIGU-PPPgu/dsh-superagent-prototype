@@ -14,6 +14,8 @@ export const SETUP_PROBLEMS = {
   repositoryUnreadable: ['github', '@{account} cannot read {repository}.'],
   repositoryUnreported: ['github', 'The agent GitHub CLI did not return {repository}.'],
   repositoryReadOnly: ['github', '@{account} cannot push to {repository}.'],
+  githubBindingDuplicate: ['github', 'GitHub binding {binding} is listed more than once.'],
+  githubRepositoryDuplicate: ['github', 'GitHub repository {repository} is listed more than once.'],
   feishuCliFailed: ['feishu', 'The bot lark-cli does not work.'],
   feishuNoApp: ['feishu', 'auth status of the bot lark-cli did not report the app.'],
   feishuBotNotReady: ['feishu', 'The bot identity of app {app} is {status}; configure the app secret with lark-cli.'],

@@ -164,9 +164,9 @@ type Row = Record<string, string>
 type Column = Extract<FieldSpec, { type: 'rows' }>['columns'][number]
 const ROWS_SHOWN = 6
 const byName = ([, a]: [string, string], [, b]: [string, string]) => a.localeCompare(b)
-function RowsField({ field, value, saved, onChange, labels, refreshLabels }: {
+function RowsField({ field, value, saved, fact, onChange, labels, refreshLabels }: {
   field: Extract<FieldSpec, { type: 'rows' }>; value: unknown; saved: unknown; onChange: (next: unknown) => void; labels: Record<string,
-    string>
+    string>; fact: Localized | string | undefined
   refreshLabels: (() => Promise<string[]>) | undefined
 }) {
   const { t, notify } = usePanel()
@@ -235,6 +235,7 @@ function RowsField({ field, value, saved, onChange, labels, refreshLabels }: {
         || row[key.key] || label })}
         onClick={() => onChange(rows.filter((_, position) => position !== index))} />
     </li>)}</ul>}
+    {fact && <small>{localized(t, fact)}</small>}
   </div>
 }
 export function SourceField({ field, value, saved, fact, onChange, labels, refreshLabels }: {
@@ -272,7 +273,7 @@ export function SourceField({ field, value, saved, fact, onChange, labels, refre
           onClick={() => navigate(settingsRoute(field.settings!))}>{t(`openSettingsOf.${field.settings}`)}</button>
       </small>}
     </div>
-    case 'rows': return <RowsField field={field} value={value} saved={saved} onChange={onChange} labels={labels}
+    case 'rows': return <RowsField field={field} value={value} saved={saved} fact={fact} onChange={onChange} labels={labels}
       refreshLabels={refreshLabels} />
   }
 }
