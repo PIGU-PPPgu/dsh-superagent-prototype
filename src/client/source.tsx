@@ -99,6 +99,7 @@ function SourceRow({ source }: { source: SourceStatusRow }) {
   const { problem, dropped } = source
   const { dot, label: state } = sourceMark(t, source.state)
   const { received, filtered, lastAt } = source.stats
+  const githubAccounts = source.id === 'github' ? setup?.accounts : undefined
   // Omit healthy parts and suppress per-part notes when a setup problem already explains why the Source is stopped.
   const notes = source.enabled && !problem && !setup?.problem ? source.health.filter(item => item.state === 'error'
     || item.state === 'paused') : []
@@ -107,6 +108,10 @@ function SourceRow({ source }: { source: SourceStatusRow }) {
     <div className="dt-row-main">
       <div className="dt-row-title"><span className="dt-row-name">{localized(t, source.title)}</span><span className="dt-status-text"
         data-state={dot}>{state}</span></div>
+      {githubAccounts && <div className="dt-row-meta">
+        <span>{githubAccounts.repository} · @{githubAccounts.agent}</span>
+        {githubAccounts.bindings.map(binding => <span key={binding.id}>{binding.repository} · @{binding.agent}</span>)}
+      </div>}
       <div className="dt-row-meta">
         {received > 0 && <LabelValue label={t('sourceReceivedLabel')}
           value={received} />}{filtered > 0 && <LabelValue label={t('sourceFilteredLabel')} value={filtered} />}

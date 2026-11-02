@@ -7,6 +7,16 @@ import { usePanel, mount, remount, settle, all, find, tab, click, type, text, fi
 import { server, problemOf, droppedReply } from './fixtures/panel-server.ts'
 
 usePanel()
+it('shows each configured GitHub repository and account in Source status', async () => {
+  server.setup = { ...server.setup, accounts: { ...server.setup.accounts!, bindings: [{ id: 'intellibrain',
+    repository: 'PIGU-PPPgu/intellibrain', agent: 'PIGU-PPPgu' }] } }
+  await mount()
+  await click(zh['tab.source'])
+  const github = all('.dt-form > .dt-list > .dt-row')[1]!
+  expect(github.textContent).toContain('acme/widgets · @agent-bot')
+  expect(github.textContent).toContain('PIGU-PPPgu/intellibrain · @PIGU-PPPgu')
+})
+
 it('shows each Source\'s state on the Source status and opens its settings from a setup problem', async () => {
   await mount()
   await click(zh['tab.source'])
