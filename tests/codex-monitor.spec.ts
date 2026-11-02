@@ -287,6 +287,21 @@ it('distinguishes child threads without a parent ID from those whose parent is u
     withoutParentTotal: 2, unresolvedParentTotal: 1 })
 })
 
+it('groups nested children and leaves parent cycles unresolved', async () => {
+  const { monitor, setLocalRows } = fixture()
+  setLocalRows([
+    { id: 'child-direct', sourceKind: 'subAgentThreadSpawn', parentThreadId: 'thread-a', archived: false },
+    { id: 'child-nested', sourceKind: 'subAgentThreadSpawn', parentThreadId: 'child-direct', archived: false },
+    { id: 'child-cycle-a', sourceKind: 'subAgentThreadSpawn', parentThreadId: 'child-cycle-b', archived: false },
+    { id: 'child-cycle-b', sourceKind: 'subAgentThreadSpawn', parentThreadId: 'child-cycle-a', archived: false },
+    { id: 'child-no-parent', sourceKind: 'subAgentOther', archived: false },
+  ])
+  await monitor.scanOnce()
+  expect(monitor.view()).toMatchObject({ childTotal: 5, unlinkedTotal: 3,
+    withoutParentTotal: 1, unresolvedParentTotal: 2 })
+  expect(monitor.view().threads[0]).toMatchObject({ id: 'thread-a', childCount: 2 })
+})
+
 it('adds a main conversation found only in the local rollout inventory', async () => {
   const { monitor, stream, inventory, setLocalRows } = fixture()
   setLocalRows([{ id: 'disk-main', name: 'Older project', sourceKind: 'vscode',
