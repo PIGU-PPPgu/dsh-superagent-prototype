@@ -26,7 +26,9 @@ export interface Api {
   'POST codex/attention/:id/ack': { body: { itemId: string; at: string }; response: CodexMonitorView }
   'GET state': { response: StateView }
   'GET overview': { response: OverviewView & { codexAttention?: number;
-    codexItems?: { id: string; title: string; reason: string; action: string }[] } }
+    codexEnabled?: boolean; codexRecentTotal?: number; codexTotal?: number;
+    codexItems?: { id: string; title: string; reason: string; action: string }[];
+    codexRecentItems?: { id: string; title: string; summary?: string }[] } }
   'GET search': { query: { q: string }; response: SearchView }
   'GET sources': { response: SourceStatusView[] }
   'GET settings': { response: SettingsView }

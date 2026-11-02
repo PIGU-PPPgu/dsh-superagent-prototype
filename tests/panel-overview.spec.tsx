@@ -6,6 +6,18 @@ import { usePanel, mount, remount, all, find, tab, click, text } from './fixture
 import { server, droppedReply, threadSummary } from './fixtures/panel-server.ts'
 
 usePanel()
+it('shows monitored Codex activity on the overview even when no conversation needs attention', async () => {
+  server.codex = { ...server.codex, enabled: true, total: 276, recentTotal: 40, threads: [{
+    id: 'codex-a', title: '桌面端改版', sourceKind: 'vscode', archived: false, present: true,
+    summary: '正在修复预览面板',
+  }] }
+  await mount()
+  expect(text()).toContain('最近 7 天 40 / 共 276 个主会话 · 0 个需处理')
+  expect(text()).toContain('正在修复预览面板')
+  await click('桌面端改版')
+  expect(tab(zh['tab.codex']).getAttribute('aria-selected')).toBe('true')
+})
+
 it('leads the overview with the pending Tickets, then problems, the last day and the Executor, each linking to its stage', async () => {
   await mount()
   expect(tab(zh['tab.overview']).getAttribute('aria-selected')).toBe('true')

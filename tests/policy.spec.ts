@@ -97,6 +97,24 @@ describe('gate', () => {
     expect(setup(boundAdmission).policy.gate(bound('Alice'), thread(), []))
       .toMatchObject({ admissible: true, strength: 'inferred', basis: { row: 'other:issues' } })
   })
+  it('admits a listed bot in its own GitHub binding only as an inferred candidate', () => {
+    const bot = { id: 'bot-comment', source: 'github', threads: [{ source: 'github', id: 'other:7' }],
+      actor: { source: 'github', id: 'chatgpt-codex-connector[bot]' }, human: false, at: '', text: 'Review update',
+      meta: { bindingId: 'other', number: 7, kind: 'conversation' } } as Trigger
+    const settings = SettingsSchema.parse({ ...base,
+      sources: { ...base.sources, github: { enabled: true, config: { repository: 'acme/widgets', cli: 'gh',
+        bindings: [{ id: 'other', repository: 'acme/other', cli: 'other-gh' }], observeComments: true } } },
+      policy: { ...base.policy, sources: { ...base.policy.sources, github: {
+        allowed: [], botsBindings: [{ bindingId: 'other', id: 'chatgpt-codex-connector[bot]' }],
+      } } } })
+    const current = setup(settings).policy
+    const admitted = current.gate(bot, thread(), [])
+    expect(admitted).toMatchObject({ admissible: true, strength: 'inferred',
+      basis: { via: 'bot', row: 'other:comments', scope: { bindingId: 'other' } } })
+    const withoutBot = SettingsSchema.parse({ ...settings, policy: { ...settings.policy,
+      sources: { ...settings.policy.sources, github: { allowed: [], botsBindings: [] } } } })
+    expect(setup(withoutBot).policy.gate(bot, thread(), [])).toEqual({ admissible: false, reason: 'not_human' })
+  })
   it('assesses follow-ups on Threads with Tickets, explicit from an allowed sender and inferred from anyone else', () => {
     const quiet = { meta: { chatId: CHAT, direct: false, mentioned: false } }
     expect(policy.gate(unaddressed({ ...quiet, actor: { source: 'feishu', id: 'ou_guest' } }), thread(['ticket']), [])).toMatchObject({ admissible: true, strength: 'inferred', basis: { via: 'followup' } })

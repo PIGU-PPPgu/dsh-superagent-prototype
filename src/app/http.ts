@@ -175,12 +175,15 @@ function routes(runtime: HttpHost): Routes {
     },
     'GET state': () => stateView(runtime),
     'GET overview': () => {
-      const monitor = runtime.codexMonitor.view(0, 0)
+      const monitor = runtime.codexMonitor.view(0, 3)
       const page = overview(views(runtime), runtime.health, policyVersion(store.settings()),
         executorLoad(store, runtime.executor.activeCount()), runtime.setupProblem ?? runtime.feishuProblem)
       return { ...page, problems: monitor.enabled ? page.problems.filter(problem =>
         problem.kind !== 'no-source' && problem.kind !== 'no-allowed') : page.problems,
         codexAttention: monitor.attentionTotal,
+        codexEnabled: monitor.enabled, codexRecentTotal: monitor.recentTotal ?? 0, codexTotal: monitor.total,
+        codexRecentItems: monitor.threads.map(thread => ({ id: thread.id, title: thread.title,
+          ...(thread.summary ? { summary: thread.summary } : {}) })),
         codexItems: monitor.attention.slice(0, 3).map(thread => ({ id: thread.id, title: thread.title,
           reason: thread.attention?.decision.reason ?? '', action: thread.attention?.decision.action ?? '' })) }
     },

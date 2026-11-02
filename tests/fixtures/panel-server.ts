@@ -183,6 +183,11 @@ const overviewView = (): ApiResponse<'GET overview'> => {
   const setup = problem ?? feishuProblem
   return {
     codexAttention: server.codex.attentionTotal,
+    codexEnabled: server.codex.enabled,
+    codexRecentTotal: server.codex.recentTotal ?? 0,
+    codexTotal: server.codex.total,
+    codexRecentItems: server.codex.threads.slice(0, 3).map(thread => ({ id: thread.id, title: thread.title,
+      ...(thread.summary ? { summary: thread.summary } : {}) })),
     codexItems: server.codex.attention.slice(0, 3).map(thread => ({
       id: thread.id, title: thread.title, reason: thread.attention?.decision.reason ?? '',
       action: thread.attention?.decision.action ?? '',

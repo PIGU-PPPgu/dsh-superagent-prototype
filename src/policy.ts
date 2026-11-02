@@ -126,7 +126,11 @@ export function allowedSender(settings: Settings, actor: ActorRef, scope?: Recor
 }
 /** Look up `actor` in the Source's `bots` policy list (validated by the Source's kind), whose messages are admitted as inferred candidates at most. */
 export function listedBot(settings: Settings, actor: ActorRef, scope?: Record<string, unknown>): z.infer<typeof AllowedSchema> | undefined {
-  if (actor.source === 'github' && typeof scope?.bindingId === 'string') return undefined
+  if (actor.source === 'github' && typeof scope?.bindingId === 'string') {
+    const rows = z.array(z.object({ bindingId: z.string(), id: z.string() })).catch([])
+      .parse(settings.policy.sources.github?.botsBindings ?? [])
+    return rows.find(entry => entry.bindingId === scope.bindingId && sameName(entry.id, actor.id))
+  }
   const bots = z.array(AllowedSchema).catch([]).parse(settings.policy.sources[actor.source]?.bots ?? [])
   return bots.find(entry => sameName(entry.id, actor.id))
 }

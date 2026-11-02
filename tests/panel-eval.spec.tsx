@@ -178,7 +178,8 @@ it('lists each Source\'s bots next to its people and saves them, and sets the Gi
   await type(bot.querySelector<HTMLInputElement>('input[aria-label="App ID 或 open_id"]')!, 'cli_reviewer')
   await type(bot.querySelector<HTMLInputElement>('input[aria-label="名字"]')!, '评审机器人')
   await click(find(zh['source.github'], '.dt-subtab'))
-  expect(lists()).toEqual(['能发起工作的 GitHub 账号', '其他仓库中能发起工作的账号', '评论可以成为候选的机器人'])
+  expect(lists()).toEqual(['能发起工作的 GitHub 账号', '其他仓库中能发起工作的账号', '评论可以成为候选的机器人',
+    '其他仓库中评论可成为候选的机器人'])
   await type((await add('评论可以成为候选的机器人')).querySelector<HTMLInputElement>('input[aria-label="账号"]')!, 'dependabot[bot]')
   // Until the GitHub Source receives the repository's Issues, pull requests, comments or CI, only messages that mention the agent arrive.
   const rows = () => all('.dt-admission tbody tr').map(row => [row.querySelector('.dt-admission-scope')!.firstChild?.textContent,

@@ -46,7 +46,7 @@ Both presets run with `danger-full-access` as the operator's OS user and read me
 
    Sign in as the agent account; the last command prints its login. dsh-superagent reads the login the same way.
 
-   The first GitHub Source repository and CLI remain the default binding. Add more rows under **Other repositories and accounts**, with a stable ID, `owner/name`, and a CLI for each account. Setup checks every identity and repository before starting. In **Policy → GitHub**, list the people who may originate work in the default repository separately from **Accounts that may originate work in additional repositories**, where each row names a binding ID and a GitHub login. Additional repositories start with the safe admission defaults and have their own Issue, PR, comment and CI rows in the admission table.
+   The first GitHub Source repository and CLI remain the default binding. Add more rows under **Other repositories and accounts**, with a stable ID, `owner/name`, and a CLI for each account. Setup checks every identity and repository before starting. In **Policy → GitHub**, list the people who may originate work in the default repository separately from **Accounts that may originate work in additional repositories**, where each row names a binding ID and a GitHub login. Bot comments can become inferred candidates only when that binding's **Bots whose comments may become candidates in additional repositories** list names the bot; bots never originate explicit requests. Additional repositories start with the safe admission defaults and have their own Issue, PR, comment and CI rows in the admission table.
 
 ### Feishu bot (optional)
 

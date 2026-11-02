@@ -17,11 +17,11 @@ it('enables automatic observation from the Codex panel', async () => {
 it('surfaces an actionable Codex conversation on the overview and lets the person acknowledge it', async () => {
   const attention = { decision: { needsAttention: true as const, kind: 'review' as const,
     reason: '结果待审阅', action: '检查发布结果' }, at: '2026-11-01T12:00:00Z', itemId: 'item-new' }
-  server.codex = { enabled: true, scannedAt: '2026-11-01T12:00:00Z', total: 1, attentionTotal: 1,
+  server.codex = { enabled: true, scannedAt: '2026-11-01T12:00:00Z', total: 1, recentTotal: 1, attentionTotal: 1,
     attention: [{ id: 'thread-a', title: '发布任务', sourceKind: 'vscode', archived: false, present: true, attention }],
     threads: [{ id: 'thread-a', title: '发布任务', sourceKind: 'vscode', archived: false, present: true, attention }] }
   await mount()
-  expect(text()).toContain('Codex 观察1')
+  expect(text()).toContain('最近 7 天 1 / 共 1 个主会话 · 1 个需处理')
   expect(text()).toContain('检查发布结果')
   await click(tab(zh['tab.codex']))
   expect(text()).toContain('需要你处理')
