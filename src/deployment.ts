@@ -42,9 +42,15 @@ export function machineOf(config: DeploymentConfig): Machine {
   return { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs }
 }
 
+export const GithubBindingSchema = z.object({
+  id: z.string().regex(/^[a-z][a-z0-9-]{0,31}$/),
+  repository: z.string().trim().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/, 'owner/name'),
+  cli: z.string().trim().min(1),
+}).strict()
 export const GithubAccountsSchema = z.object({
   repository: z.string().trim().regex(/^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?$/, 'owner/name').default(''),
   cli: z.string().trim().default(''),
+  bindings: z.array(GithubBindingSchema).default([]),
 })
 export const FeishuBotSchema = z.object({ cli: z.string().trim().default('') })
 /** Source configuration keys that affect deployment setup and trigger a restart when changed. */
@@ -53,6 +59,7 @@ export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = { githu
 export interface Deployment extends Machine {
   repository: string
   github: { cli: string; login: string; noreply: string }
+  githubBindings?: Record<string, { repository: string; github: { cli: string; login: string; noreply: string } }>
   feishu?: FeishuBot
 }
 export interface FeishuBot { cli: string; appId: string; brand: 'feishu' | 'lark'; botId: string; name: string }
@@ -72,7 +79,8 @@ export type Probe = (argv: string[]) => Promise<string>
 /** Run startup checks through DSH's worker subprocess service with worker shims removed from PATH so a `gh` wrapper script reaches the real binary. */
 export function workerProbe(subprocess: SubprocessRuntime, stateDir: string, cwd: string, signal: AbortSignal): Probe {
   const path = withoutDirectory(process.env.PATH ?? '', workerBin(stateDir))
-  return argv => runAsWorker(subprocess, ['env', `PATH=${path}`, ...argv], cwd, AbortSignal.any([signal, AbortSignal.timeout(60_000)]))
+  return argv => runAsWorker(subprocess, ['env', '-u', 'GH_CONFIG_DIR', `PATH=${path}`, ...argv], cwd,
+    AbortSignal.any([signal, AbortSignal.timeout(60_000)]))
 }
 
 const GithubUser = z.object({ login: z.string().regex(/^[A-Za-z0-9-]+$/), id: z.number().int().positive() })
@@ -87,22 +95,41 @@ function parsed<T>(schema: z.ZodType<T>, text: string): T | undefined {
 export async function resolveDeployment(machine: Machine, github: unknown, probe: Probe, path = process.env.PATH ?? ''): Promise<Deployment> {
   const { stateDir } = machine
   const accounts = GithubAccountsSchema.parse(github ?? {})
-  const remote = accounts.repository
-  if (!remote) throw new SetupError('repositoryUnset')
-  if (!accounts.cli) throw new SetupError('agentCliUnset')
-  let cli: string
-  try { cli = executable(accounts.cli, path, workerBin(stateDir)) } catch (error) { throw new SetupError('agentCliMissing', { output: reason(error) }) }
-  const text = await probe([cli, 'api', 'user']).catch((error: unknown) => { throw new SetupError('agentCliSignedOut', { output: reason(error) }) })
-  const agent = parsed(GithubUser, text)
-  if (!agent) throw new SetupError('agentCliNoAccount')
-  // Use the canonical repository name returned by GitHub so renamed repositories match incoming notifications.
-  const access = parsed(RepositoryAccess, await probe([cli, 'api', `repos/${remote}`, '--jq', '{name: .full_name, push: .permissions.push}']).catch((error: unknown) => {
-    throw new SetupError('repositoryUnreadable', { account: agent.login, repository: remote, output: reason(error) })
-  }))
-  if (!access) throw new SetupError('repositoryUnreported', { repository: remote })
-  const repository = access.name
-  if (access.push !== true) throw new SetupError('repositoryReadOnly', { account: agent.login, repository })
-  return { ...machine, repository, github: { cli, login: agent.login, noreply: `${agent.id}+${agent.login}@users.noreply.github.com` } }
+  const resolve = async (remote: string, name: string) => {
+    if (!remote) throw new SetupError('repositoryUnset')
+    if (!name) throw new SetupError('agentCliUnset')
+    let cli: string
+    try { cli = executable(name, path, workerBin(stateDir)) }
+    catch (error) { throw new SetupError('agentCliMissing', { output: reason(error) }) }
+    const text = await probe([cli, 'api', 'user']).catch((error: unknown) => {
+      throw new SetupError('agentCliSignedOut', { output: reason(error) })
+    })
+    const agent = parsed(GithubUser, text)
+    if (!agent) throw new SetupError('agentCliNoAccount')
+    // Use GitHub's canonical name so renamed repositories match incoming notifications.
+    const access = parsed(RepositoryAccess, await probe([cli, 'api', `repos/${remote}`, '--jq', '{name: .full_name, push: .permissions.push}']).catch((error: unknown) => {
+      throw new SetupError('repositoryUnreadable', { account: agent.login, repository: remote, output: reason(error) })
+    }))
+    if (!access) throw new SetupError('repositoryUnreported', { repository: remote })
+    if (access.push !== true) throw new SetupError('repositoryReadOnly', { account: agent.login, repository: access.name })
+    return { repository: access.name, github: { cli, login: agent.login,
+      noreply: `${agent.id}+${agent.login}@users.noreply.github.com` } }
+  }
+  const primary = await resolve(accounts.repository, accounts.cli)
+  const bindings: NonNullable<Deployment['githubBindings']> = {}
+  const repositories = new Set([primary.repository.toLowerCase()])
+  for (const entry of accounts.bindings) {
+    if (['default', 'ci', 'issues', 'pulls', 'commits'].includes(entry.id) || entry.id in bindings) {
+      throw new SetupError('githubBindingDuplicate', { binding: entry.id })
+    }
+    const binding = await resolve(entry.repository, entry.cli)
+    if (repositories.has(binding.repository.toLowerCase())) {
+      throw new SetupError('githubRepositoryDuplicate', { repository: binding.repository })
+    }
+    repositories.add(binding.repository.toLowerCase())
+    bindings[entry.id] = binding
+  }
+  return { ...machine, ...primary, githubBindings: bindings }
 }
 
 const AuthStatus = z.object({ appId: z.string().regex(/^cli_[A-Za-z0-9]+$/), brand: z.enum(['feishu', 'lark']).default('feishu'), identities: z.object({ bot: z.object({ status: z.string() }) }) })

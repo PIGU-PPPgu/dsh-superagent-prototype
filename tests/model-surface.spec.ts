@@ -91,7 +91,9 @@ async function start() {
   const reader = (text: string) => ({ readFrom: () => ({ text, nextOffset: text.length, lossy: false }) })
   const subprocess = { spawn: (spec: { argv: readonly string[] }) => {
     const argv = [...spec.argv]
-    while (argv[0] === 'env' || /^[A-Z_]+=/.test(argv[0] ?? '')) argv.shift()
+    while (argv[0] === 'env' || argv[0] === '-u' || /^[A-Z_]+=/.test(argv[0] ?? '')) {
+      if (argv.shift() === '-u') argv.shift()
+    }
     const collected = { stdout: reader(answers[argv.join(' ')] ?? ''), stderr: reader('') }
     return { done: Promise.resolve({ exitCode: 0, signal: null }), collected }
   } }

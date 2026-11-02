@@ -5,7 +5,7 @@ Use this guide to install, configure and operate dsh-superagent. It covers accou
 ## What runs
 
 - **A dedicated DeepSeek Harness profile**, called `superagent` in this guide. Create it from the Web profile template. It loads the bundle and serves its panel on `127.0.0.1`. Keep it separate from the profile you work in: the plugin changes process-wide `PATH` and git settings, and its process needs independent restarts and upgrades.
-- **An agent GitHub account.** The agent comments, pushes branches and opens pull requests as this account, through a GitHub CLI signed in only as that account.
+- **GitHub accounts for configured repositories.** Each repository uses its own GitHub CLI identity for comments, branches and pull requests.
 - **Optional:** a Feishu bot for chat requests.
 
 Plugin configuration holds the state directory and machine limits. Use the panel for everything else: Sources for the repository and accounts, Policy for allowed lists, and Execution for worker directories and commands.
@@ -16,13 +16,13 @@ The bundle defines `dsh-superagent-worker` for Executors and `dsh-superagent-rou
 
 Opening a blank managed Session in the Web UI can select the profile's default preset. dsh-superagent restores its role-specific preset before the first turn.
 
-Both presets run with `danger-full-access` as the operator's OS user and read messages from subscribed Threads. Account wrappers choose the agent's credentials by default; they do not isolate the process. A worker can execute programs by path and read the operator's home directory. For isolation, use a dedicated OS account containing only the agent's credentials.
+Both presets run with `danger-full-access` as the operator's OS user and read messages from subscribed Threads. DSH's managed shell environment selects the ticket's configured GitHub CLI and git credential helper by default; wrappers do not isolate the process. A worker can execute programs by path and read the operator's home directory. For isolation, use a dedicated OS account containing only the agent's credentials.
 
 ## Prerequisites
 
 - Node.js 22.19+ or 24+, pnpm, git 2.32+, Python 3.8+ and tmux
 - GitHub CLI (`gh`) 2.48 or later. Source CLI fields must point to `gh` or `lark-cli` wrappers; the host relies on their subcommands and output formats.
-- A repository on github.com; GitHub Enterprise Server is not supported. To create a checkout per Ticket, keep a local clone from which the prepare command can add worktrees. Install `git-lfs` if that repository uses Git LFS.
+- Repositories on github.com; GitHub Enterprise Server is not supported. Give each GitHub CLI push access to its repository. Install `git-lfs` if a repository uses Git LFS.
 - A model provider configured for DeepSeek Harness. dsh-superagent uses the profile's default model unless the Eval or Execution settings name another.
 - For Feishu: `lark-cli` (tested with 1.0.90) and a Feishu or Lark app with a bot
 
@@ -45,6 +45,8 @@ Both presets run with `danger-full-access` as the operator's OS user and read me
    ```
 
    Sign in as the agent account; the last command prints its login. dsh-superagent reads the login the same way.
+
+   The first GitHub Source repository and CLI remain the default binding. Add more rows under **Other repositories and accounts**, with a stable ID, `owner/name`, and a CLI for each account. Setup checks every identity and repository before starting. In **Policy → GitHub**, list the people who may originate work in the default repository separately from **Accounts that may originate work in additional repositories**, where each row names a binding ID and a GitHub login. Additional repositories start with the safe admission defaults and have their own Issue, PR, comment and CI rows in the admission table.
 
 ### Feishu bot (optional)
 
@@ -151,6 +153,18 @@ Setup must succeed before polling or work starts. Overview lists missing require
    ```sh
    git -C /home/me/src/widgets fetch --no-tags "https://github.com/$DSH_SUPERAGENT_GITHUB_REPOSITORY.git" "${DSH_SUPERAGENT_GITHUB_PR_HEAD:-HEAD}:refs/dsh-superagent/$DSH_SUPERAGENT_TICKET" &&
    git -C /home/me/src/widgets worktree add -b "agent/$DSH_SUPERAGENT_NAME" "$DSH_SUPERAGENT_DIR" "refs/dsh-superagent/$DSH_SUPERAGENT_TICKET"
+   ```
+
+   With multiple repositories, use the ticket's repository variable to prepare a separate clone without changing an existing checkout:
+
+   ```sh
+   git clone "https://github.com/$DSH_SUPERAGENT_GITHUB_REPOSITORY.git" "$DSH_SUPERAGENT_DIR" &&
+   if [ -n "$DSH_SUPERAGENT_GITHUB_PR_HEAD" ]; then
+     git -C "$DSH_SUPERAGENT_DIR" fetch origin "$DSH_SUPERAGENT_GITHUB_PR_HEAD" &&
+     git -C "$DSH_SUPERAGENT_DIR" switch -c "agent/$DSH_SUPERAGENT_NAME" FETCH_HEAD
+   else
+     git -C "$DSH_SUPERAGENT_DIR" switch -c "agent/$DSH_SUPERAGENT_NAME"
+   fi
    ```
 
    List personal CLIs, such as one signed in to your own account, as blocked commands.

@@ -65,6 +65,19 @@ describe('setup', () => {
     // A renamed repository is still resolved by its old name; notifications carry GitHub's current full_name.
     expect((await resolveDeployment(machine(), { repository: 'acme/gadgets', cli: 'gh' }, probe, path)).repository).toBe('acme/widgets')
   })
+  it('verifies an additional repository with its own GitHub account', async () => {
+    const secondary = program(join(dir, 'bin', 'gh-secondary'), `case "$*" in\n  "api user") echo '{"login":"Second-Bot","id":8}' ;;\n  "api repos/acme/other --jq {name: .full_name, push: .permissions.push}") echo '{"name":"acme/other","push":true}' ;;\n  *) exit 1 ;;\nesac`)
+    const deployment = await resolveDeployment(machine(), { repository: 'acme/widgets', cli: 'gh',
+      bindings: [{ id: 'other', repository: 'acme/other', cli: secondary }] }, probe, path)
+    expect(deployment.githubBindings).toEqual({ other: { repository: 'acme/other', github: {
+      cli: secondary, login: 'Second-Bot', noreply: '8+Second-Bot@users.noreply.github.com' } } })
+    await expect(resolveDeployment(machine(), { repository: 'acme/widgets', cli: 'gh',
+      bindings: [{ id: 'default', repository: 'acme/other', cli: secondary }] }, probe, path))
+      .rejects.toMatchObject({ code: 'githubBindingDuplicate' })
+    await expect(resolveDeployment(machine(), { repository: 'acme/widgets', cli: 'gh',
+      bindings: [{ id: 'other', repository: 'acme/widgets', cli: 'gh' }] }, probe, path))
+      .rejects.toMatchObject({ code: 'githubRepositoryDuplicate' })
+  })
   it('names what setup needs and where it is set', async () => {
     const needs = (place: string, code: string, values: Record<string, unknown>, github: unknown) =>
       expect(resolveDeployment(machine(), github, probe, path)).rejects.toEqual(setupError(place, code, values))

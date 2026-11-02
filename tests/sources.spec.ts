@@ -5,10 +5,11 @@ import { backfillChat, consumerRetry, feishuKind, feishuTriggerId, feishuRef, fe
 import { KV } from '../src/kv.ts'
 import { apply as applyFeishu, pollThreads as pollFeishuThreads } from '../src/sources/feishu.ts'
 import { runFeishu } from '../src/sources/feishu-loops.ts'
-import { commentTrigger, githubAddress, githubChannel, issueTrigger, type GithubComment, type GithubIssue } from '../src/sources/github-trigger.ts'
+import { commentTrigger, githubAddress, githubChannel, issueTrigger, pullTrigger, type GithubComment, type GithubIssue } from '../src/sources/github-trigger.ts'
 import { claimPull, observePull, pullEndNotices, pullOf, ticketBranch, type Pull } from '../src/sources/github-pull.ts'
 import { ciCounts, ciFact, ciSummary } from '../src/sources/github-read.ts'
 import { apply as applyGithub, githubKind, pollFailure, pollRound } from '../src/sources/github.ts'
+import { githubBindingContext } from '../src/sources/github-binding.ts'
 import { pollThreads as pollGithubThreads } from '../src/sources/github.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
 import { cursorAt, POLL_HORIZON_MS } from '../src/sources/poll.ts'
@@ -325,6 +326,65 @@ describe('feishu source', () => {
   })
 })
 describe('github source', () => {
+  it('ingests the same Issue number from two accounts into separate threads and cursors', async () => {
+    const base = testDeployment()
+    const deployment = testDeployment({ githubBindings: { other: { repository: 'acme/other', github: {
+      cli: '/path/other-gh', login: 'other-agent', noreply: '8+other-agent@users.noreply.github.com' } } } })
+    const commands = new Commands(() => deployment, {}, new AbortController().signal)
+    const h = host({ deployment, commands })
+    const settings = h.store.settings()
+    h.store.saveSettings({ ...settings,
+      sources: { ...settings.sources, github: { enabled: true, config: { repository: 'acme/widgets', cli: 'gh',
+        bindings: [{ id: 'other', repository: 'acme/other', cli: '/path/other-gh' }] } } },
+      policy: { ...settings.policy, sources: { ...settings.policy.sources,
+        github: { ...settings.policy.sources.github!, allowedBindings: [{ bindingId: 'other', id: 'alice' }] } } } })
+    const created = new Date(Date.now() + 60_000).toISOString()
+    const run = vi.spyOn(Commands.prototype, 'run').mockImplementation(async (_program, args) => {
+      const path = args[1] ?? ''
+      const other = path.startsWith('repos/acme/other/')
+      const repository = other ? 'acme/other' : base.repository
+      const account = other ? 'other-agent' : base.github.login
+      if (path.includes('/notifications?')) return `HTTP/2.0 200 OK\r\nX-Poll-Interval: 60\r\n\r\n${JSON.stringify([{
+        repository: { full_name: repository }, subject: { url: `https://api.github.com/repos/${repository}/issues/7` },
+      }])}`
+      if (path.includes('/issues/7/comments?')) return '[[]]'
+      if (path.endsWith('/issues/7')) return JSON.stringify({ id: 7, number: 7, title: 'Fix', state: 'open',
+        body: `@${account} please fix`, user: { login: 'alice' }, created_at: created,
+        html_url: `https://github.com/${repository}/issues/7` })
+      throw new Error(`Unexpected GitHub read: ${path}`)
+    })
+    try {
+      await pollRound(githubBindingContext(h.context(githubKind)))
+      await pollRound(githubBindingContext(h.context(githubKind), 'other'))
+      expect(h.store.threads.get('github:7')).toBeDefined()
+      expect(h.store.threads.get('github:other:7')).toBeDefined()
+      expect(h.store.threads.get('github:7')?.key).not.toBe(h.store.threads.get('github:other:7')?.key)
+      expect(h.store.keys('github-since')).toHaveLength(1)
+      expect(h.store.keys('github-binding:other:github-since')).toHaveLength(1)
+      expect(run.mock.calls.some(([program, args]) => program === '/path/other-gh'
+        && args[1]?.startsWith('repos/acme/other/'))).toBe(true)
+    } finally { run.mockRestore(); h.store.close() }
+  })
+  it('claims the same PR number for separate tickets without crossing account bindings', async () => {
+    const deployment = testDeployment({ githubBindings: { other: { repository: 'acme/other', github: {
+      cli: '/path/other-gh', login: 'other-agent', noreply: '8+other-agent@users.noreply.github.com' } } } })
+    const h = host({ deployment, commands: new Commands(() => deployment, {}, new AbortController().signal) })
+    const source = (repository: string, bindingId?: string) => pullTrigger({ number: 7, title: 'Fix', body: '',
+      user: { login: 'alice' }, created_at: '2026-09-01T00:00:00Z',
+      html_url: `https://github.com/${repository}/pull/7` }, 'agent-bot', bindingId)
+    const primary = source('acme/widgets'), secondary = source('acme/other', 'other')
+    await h.receive(primary); await h.receive(secondary)
+    h.store.tickets.save({ ...openTicket('primary'), origin: { triggerId: primary.id, triggerIds: [primary.id] } })
+    h.store.tickets.save({ ...openTicket('secondary'), origin: { triggerId: secondary.id, triggerIds: [secondary.id] } })
+    const first = githubBindingContext(h.context(githubKind))
+    const second = githubBindingContext(h.context(githubKind), 'other')
+    expect(claimPull(first, 'primary', openPull(7))).toBeUndefined()
+    expect(claimPull(second, 'secondary', { ...openPull(7), html_url: 'https://github.com/acme/other/pull/7' })).toBeUndefined()
+    expect(h.store.tickets.get('primary')?.follows?.[0]?.thread).toBe('github:7')
+    expect(h.store.tickets.get('secondary')?.follows?.[0]?.thread).toBe('github:other:7')
+    expect(claimPull(second, 'primary', openPull(7))).toContain('Ticket ended')
+    h.store.close()
+  })
   it('normalizes comments and reviews into triggers with review-thread channels, and marks only GitHub Apps and machine accounts as automated', () => {
     const trigger = commentTrigger({ id: 5, body: 'nit', user: { login: 'review-bot[bot]', type: 'Bot' }, html_url: 'https://github.com/acme/widgets/pull/7#discussion_r5', updated_at: '2026-09-01T00:00:00Z' }, { number: 7, isPr: true, prAuthor: 'agent-bot' }, 'inline', 'agent-bot')
     expect(trigger).toMatchObject({ source: 'github', threads: [{ source: 'github', id: '7' }], human: false, channel: { address: { number: '7', url: 'https://github.com/acme/widgets/pull/7#discussion_r5' } }, meta: { commentId: 5, kind: 'inline', prAuthor: 'agent-bot' } })
@@ -1023,7 +1083,7 @@ it('reports GitHub as failing only after the configured number of consecutive fa
   expect(pollFailure(1, 3, eof)).toBeUndefined()
   expect(pollFailure(2, 3, eof)).toBeUndefined()
   expect(pollFailure(3, 3, eof)).toEqual({ state: 'error', detail: '3 consecutive failed polls; last: Error: Get "https://api.github.com/x": EOF', code: 'pollFailures', values: { count: '3', error: 'Error: Get "https://api.github.com/x": EOF' } })
-  expect(githubKind.schema.parse({})).toEqual({ repository: '', cli: '', pollSeconds: 60, failuresBeforeError: 3, observeIssues: false,
+  expect(githubKind.schema.parse({})).toEqual({ repository: '', cli: '', bindings: [], pollSeconds: 60, failuresBeforeError: 3, observeIssues: false,
     observePulls: false, observeComments: false, observeCi: false })
 })
 describe('feishu event consumer', () => {

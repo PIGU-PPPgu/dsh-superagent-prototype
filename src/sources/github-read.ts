@@ -159,6 +159,7 @@ async function conversationPage(commands: Commands, number: number, page: number
 export const githubThreadContext: ThreadContext<unknown> = {
   messageId: trigger => trigger.url ?? '',
   read: async (commands, trigger, part, cursor) => {
+    if (typeof trigger.meta.bindingId === 'string') commands = commands.forBinding(trigger.meta.bindingId)
     // The default branch's CI has no conversation; its Trigger is its context.
     if (typeof trigger.meta.branch === 'string') {
       const message = { id: trigger.url ?? trigger.id, from: 'CI', at: trigger.at, text: trigger.text, bot: true as const }

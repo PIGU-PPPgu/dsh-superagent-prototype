@@ -2,6 +2,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { z } from 'zod'
 import { UserError, type EngineForSettings } from '../core/index.ts'
+import { GithubAccountsSchema } from '../deployment.ts'
 import { EvalConfigSchema, ExecutorConfigSchema, PolicyConfigSchema, SettingsSchema, policyEffects, policyVersion } from '../policy.ts'
 import type { Settings as SettingsValue, SettingsBlock, SettingsOrigin, SettingsSave } from '../policy.ts'
 import type { SourceHost } from '../sources/host.ts'
@@ -54,7 +55,7 @@ const BLOCKS: Record<'policy' | 'eval' | 'executor' | 'source', Block> = {
 
 /** Host dependencies used by `Settings`. */
 export interface SettingsHost {
-  readonly store: Pick<Store, 'settings' | 'saveSettings' | 'blockRevision' | 'atomic' | 'tickets' | 'get'>
+  readonly store: Pick<Store, 'settings' | 'saveSettings' | 'blockRevision' | 'atomic' | 'tickets' | 'triggers' | 'get'>
   readonly sources: SourceRegistry
   /** Notified when a settings save changes the policy version. */
   readonly engine: EngineForSettings
@@ -102,6 +103,22 @@ export class Settings {
     let entry = this.syncs.get(id)
     if (!entry) this.syncs.set(id, entry = this.host.health.claim(`sync:${id}`))
     return entry
+  }
+  /** An open GitHub ticket must keep the repository and CLI that accepted it. */
+  private checkGithubTickets(before: SettingsValue, after: SettingsValue): void {
+    const old = GithubAccountsSchema.parse(before.sources.github?.config ?? {})
+    const next = GithubAccountsSchema.parse(after.sources.github?.config ?? {})
+    const binding = (config: typeof old, id: string) => id === 'default'
+      ? { repository: config.repository, cli: config.cli }
+      : config.bindings.find(row => row.id === id)
+    for (const ticket of this.host.store.tickets.open()) {
+      const origin = this.host.store.triggers.get(ticket.origin.triggerId)
+      if (origin?.source !== 'github') continue
+      const id = typeof origin.meta.bindingId === 'string' ? origin.meta.bindingId : 'default'
+      const previous = binding(old, id), candidate = binding(next, id)
+      if (!previous || !candidate || previous.repository.toLowerCase() !== candidate.repository.toLowerCase()
+        || previous.cli !== candidate.cli) throw new UserError('githubBindingInUse', { binding: id })
+    }
   }
   /** Returns the current validated settings from `Store`. */
   current(): SettingsValue { return this.host.store.settings() }
@@ -164,11 +181,13 @@ export class Settings {
       catch (error) { throw new UserError('modelUnavailable', { block, error: error instanceof Error ? error.message : String(error) }) }
     }
     rules.guard?.(current, candidate, origin)
+    if (block === 'source:github') this.checkGithubTickets(current, candidate)
     if (setupChanged(current, candidate)) await this.host.setup.checkAccounts(block, candidate)
     if (stale()) throw new SettingsConflict('Settings changed during the checks. Reload before saving.')
     // Re-read current settings after async checks in case unrelated blocks were saved concurrently.
     const old = store.settings()
     const settings = rules.merge(old, parsed, id)
+    if (block === 'source:github') this.checkGithubTickets(old, settings)
     if (JSON.stringify(SettingsSchema.parse(settings)) === JSON.stringify(old)) {
       const delivery = await sessions.delivery(`settings:${block}`)
       return { saved: true, revision: store.blockRevision(block), policy_changed: false, restarting: false, context_delivery: delivery }

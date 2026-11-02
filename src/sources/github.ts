@@ -12,6 +12,7 @@ import type { GithubComment, PullRef } from './github-trigger.ts'
 import { observePull, pullsOf, readPull, type Pull } from './github-pull.ts'
 import { health, sourceContext, type Health, type SourceContext } from './host.ts'
 import { KV } from '../kv.ts'
+import { githubBindingContext, type GithubContext } from './github-binding.ts'
 import { cursorAt, pause, POLL_HORIZON_MS, pollThreads as pollEach } from './poll.ts'
 import type { Localized, SourceKind } from './kind.ts'
 import { z } from 'zod'
@@ -45,6 +46,14 @@ export const githubKind: SourceKind<GithubConfig> = {
       hint: { zh: '写作 owner/name。这个来源接收这个仓库的通知和讨论；保存时检查智能体账号能否推送到它，然后重启 dsh-superagent。', en: 'Written owner/name. This Source receives the repository\'s notifications and discussion; saving checks that the agent account can push to it, then restarts dsh-superagent.' } },
     { key: 'cli', type: 'text', label: { zh: '智能体的 GitHub CLI', en: 'Agent GitHub CLI' },
       hint: { zh: '命令名或绝对路径，通常是用 GH_CONFIG_DIR 登录智能体账号的 gh 包装脚本。智能体以它登录的账号行事，执行器以 gh 调用它。保存时检查它登录的账号能否推送到仓库，然后重启 dsh-superagent。', en: 'A command name or absolute path, usually a gh wrapper signed in to the agent account through GH_CONFIG_DIR. The agent acts as the account it is signed in to, and the Executor calls it as gh. Saving checks that this account can push to the repository, then restarts dsh-superagent.' } },
+    { key: 'bindings', type: 'rows', label: { zh: '其他仓库与账号', en: 'Additional repositories and accounts' },
+      hint: { zh: '每行指定独立的仓库和 GitHub CLI。ID 保存后固定，用于隔离同编号的 Issue 和 PR。',
+        en: 'Each row uses its own repository and GitHub CLI. The ID stays fixed after saving and separates Issue and PR numbers.' },
+      columns: [
+        { key: 'id', type: 'text', label: { zh: 'ID', en: 'ID' }, pattern: '[a-z][a-z0-9-]{0,31}' },
+        { key: 'repository', type: 'text', label: { zh: '仓库', en: 'Repository' }, pattern: '[A-Za-z0-9_.\\-]+/[A-Za-z0-9_.\\-]+' },
+        { key: 'cli', type: 'text', label: { zh: 'GitHub CLI', en: 'GitHub CLI' } },
+      ] },
     { key: 'pollSeconds', type: 'number', advanced: true, min: 60, max: 3600, label: { zh: '轮询间隔 / 秒', en: 'Polling interval / seconds' }, hint: { zh: 'GitHub 要求更长间隔时以 GitHub 为准。', en: 'A longer interval requested by GitHub wins.' } },
     { key: 'failuresBeforeError', type: 'number', advanced: true, min: 1, max: 20, label: { zh: '连续失败几次后报告异常', en: 'Failed polls before reporting an error' }, hint: { zh: '单次网络中断会在下一次轮询时自动重试，不必报告。', en: 'A single network interruption is retried on the next poll and need not be reported.' } },
     { key: 'observeIssues', type: 'switch', label: { zh: '接收仓库里的新 Issue', en: 'Receive new Issues in the repository' },
@@ -57,22 +66,40 @@ export const githubKind: SourceKind<GithubConfig> = {
       hint: { zh: '打开后，默认分支的 CI 失败和恢复会收到，由策略的接收表决定是否成为候选。', en: 'Failures of the default branch\'s CI, and its recovery, are received, and the Policy\'s admission table decides whether they become candidates.' } }],
   // What the Source observes across the repository it receives in full; elsewhere, only what addresses the agent.
   scope: ({ meta }, config) => {
+    if (typeof meta.bindingId === 'string' && !config.bindings.some(binding => binding.id === meta.bindingId)) {
+      return { listened: false, reason: 'binding_not_configured' }
+    }
     const row = scopeOf(meta)
-    return { listened: true, observed: row !== undefined && config[OBSERVED[row]], ...row ? { row } : {} }
+    return { listened: true, observed: row !== undefined && config[OBSERVED[row]],
+      ...row ? { row: typeof meta.bindingId === 'string' ? `${meta.bindingId}:${row}` : row } : {} }
   },
   health: ['github'],
   channel: { send: sendGithub, link: githubLink },
   threadContext: githubThreadContext,
   // `#12`, `12`, or the page of an Issue or PR, of any repository, names Thread 12.
-  find: query => {
-    const number = (/^#?(\d+)$/.exec(query.trim()) ?? /github\.com\/[^/]+\/[^/]+\/(?:pull|issues)\/(\d+)/.exec(query))?.[1]
-    return { threads: number ? [`${SOURCE}:${number}`] : [], terms: [] }
+  find: (query, config, origin) => {
+    const url = /github\.com\/([^/]+\/[^/]+)\/(?:pull|issues)\/(\d+)/i.exec(query)
+    const number = url?.[2] ?? /^#?(\d+)$/.exec(query.trim())?.[1]
+    if (!number) return { threads: [], terms: [] }
+    const bindingId = url
+      ? config.bindings.find(binding => sameName(binding.repository, url[1]!))?.id
+      : origin?.source === SOURCE && typeof origin.meta.bindingId === 'string' ? origin.meta.bindingId : undefined
+    if (url && config.repository && !sameName(config.repository, url[1]!) && !bindingId) {
+      return { threads: [], terms: [] }
+    }
+    return { threads: [`${SOURCE}:${bindingId ? `${bindingId}:` : ''}${number}`], terms: [] }
   },
   policy: {
     schema: z.object({ allowed: z.array(z.object({ id: z.string().regex(/^[A-Za-z0-9-]+$/) }).strict()).default([]),
+      allowedBindings: z.array(z.object({ bindingId: z.string().regex(/^[a-z][a-z0-9-]{0,31}$/),
+        id: z.string().regex(/^[A-Za-z0-9-]+$/) }).strict()).optional(),
       bots: z.array(z.object({ id: z.string().regex(/^[A-Za-z0-9-]+(\[bot\])?$/) }).strict()).optional() }).strict(),
     fields: [{ key: 'allowed', type: 'rows', label: { zh: '能发起工作的 GitHub 账号', en: 'GitHub accounts that may originate work' },
       columns: [{ key: 'id', type: 'text', label: { zh: '账号', en: 'Account' }, pattern: '[A-Za-z0-9\\-]+' }] },
+    { key: 'allowedBindings', type: 'rows', label: { zh: '其他仓库中能发起工作的账号',
+      en: 'Accounts that may originate work in additional repositories' },
+      columns: [{ key: 'bindingId', type: 'text', label: { zh: '仓库 ID', en: 'Repository ID' }, pattern: '[a-z][a-z0-9-]{0,31}' },
+      { key: 'id', type: 'text', label: { zh: '账号', en: 'Account' }, pattern: '[A-Za-z0-9\\-]+' }] },
     { key: 'bots', type: 'rows', label: { zh: '评论可以成为候选的机器人', en: 'Bots whose comments may become candidates' },
       hint: { zh: '名单里的机器人账号（例如 dependabot[bot]）的评论在来源收到时成为推断的候选，交给评估：评论 @ 了智能体，或者打开了“接收仓库里的评论”。它们不能发起明确的请求，也不能停止工单；其他机器人的评论不接收。', en: 'A comment of a bot account on this list, such as dependabot[bot], becomes an inferred candidate for an assessment when the Source receives it: when it mentions the agent, or with Receive comments in the repository on. Such a comment never makes an explicit request or stops a ticket; other bots\' comments are not admitted.' },
       columns: [{ key: 'id', type: 'text', label: { zh: '账号', en: 'Account' }, pattern: '[A-Za-z0-9\\-]+(\\[bot\\])?' }] }],
@@ -80,17 +107,26 @@ export const githubKind: SourceKind<GithubConfig> = {
     rows(stored) {
       const config = GithubConfigSchema.partial().parse(stored)
       const note = (observed: boolean | undefined) => observed ? { zh: '全部', en: 'All' } : { zh: '仅 @', en: '@ only' }
-      const row = (id: Scope, label: { zh: string; en: string }) => ({ id, label, note: note(config[OBSERVED[id]]),
+      const row = (id: Scope, label: { zh: string; en: string }, bindingId?: string) => ({
+        id: bindingId ? `${bindingId}:${id}` : id,
+        label: bindingId ? { zh: `${bindingId} · ${label.zh}`, en: `${bindingId} · ${label.en}` } : label,
+        note: note(config[OBSERVED[id]]),
         cells: { listedUnaddressed: !!config[OBSERVED[id]], unlistedAddressed: true, unlistedUnaddressed: !!config[OBSERVED[id]] } })
-      return [row('issues', { zh: '新 Issue', en: 'New Issues' }), row('pulls', { zh: '新 PR', en: 'New pull requests' }),
-        row('comments', { zh: '评论', en: 'Comments' }),
-        // CI has no sender, so only the cell of a sender off the list who does not address the agent applies.
-        { id: 'ci', label: { zh: '默认分支的 CI', en: 'Default branch CI' }, note: config.observeCi ? { zh: '接收', en: 'Received' } : { zh: '不接收', en: 'Not received' },
+      const rows = (bindingId?: string) => [row('issues', { zh: '新 Issue', en: 'New Issues' }, bindingId),
+        row('pulls', { zh: '新 PR', en: 'New pull requests' }, bindingId),
+        row('comments', { zh: '评论', en: 'Comments' }, bindingId),
+        // CI has no sender, so only the unlisted, unaddressed cell applies.
+        { id: bindingId ? `${bindingId}:ci` : 'ci',
+          label: bindingId ? { zh: `${bindingId} · 默认分支的 CI`, en: `${bindingId} · Default branch CI` }
+            : { zh: '默认分支的 CI', en: 'Default branch CI' },
+          note: config.observeCi ? { zh: '接收', en: 'Received' } : { zh: '不接收', en: 'Not received' },
           cells: { listedUnaddressed: false, unlistedAddressed: false, unlistedUnaddressed: !!config.observeCi } }]
+      return [...rows(), ...(config.bindings ?? []).flatMap(binding => rows(binding.id))]
     },
   },
   environment: {
     variables: [
+      { key: 'DSH_SUPERAGENT_GITHUB_BINDING', description: { zh: '这个工单的 GitHub 绑定 ID；命令按它选择仓库与账号', en: 'GitHub binding ID for this ticket; commands select its repository and account' } },
       { key: 'DSH_SUPERAGENT_GITHUB_REPOSITORY', description: { zh: '这个来源监听的仓库，owner/name。智能体在这里开的 PR，分支最后一段是 DSH_SUPERAGENT_NAME 时（例如 agent/$DSH_SUPERAGENT_NAME）会关联到工单', en: 'The repository this Source watches, as owner/name. A PR the agent opens here from a branch whose last path segment is DSH_SUPERAGENT_NAME (for example agent/$DSH_SUPERAGENT_NAME) binds to the ticket' } },
       { key: 'DSH_SUPERAGENT_GITHUB_ACCOUNT', description: { zh: '智能体的 GitHub 账号；gh 以它登录，除自动合并外的 GitHub 操作都用 gh，不用其他账号或凭据', en: 'The agent\'s GitHub account. gh is signed in to it; use gh for every GitHub operation except auto-merge, and never another account or credential' } },
       { key: 'DSH_SUPERAGENT_GITHUB_COMMIT_EMAIL', description: { zh: '智能体账号的提交邮箱。这里的 git 没有身份：按提示词写明的作者提交，没有写明时用智能体账号和这个邮箱', en: 'Commit email of the agent\'s account. git has no identity here: commit as the author these instructions name, or as the agent\'s account with this email when they name none' } },
@@ -99,12 +135,17 @@ export const githubKind: SourceKind<GithubConfig> = {
     ],
     values: ({ deployment, trigger }) => {
       const number = trigger?.threads[0]?.source === SOURCE ? Number(trigger.meta.number) || 0 : 0
-      return { DSH_SUPERAGENT_GITHUB_REPOSITORY: deployment.repository, DSH_SUPERAGENT_GITHUB_ACCOUNT: deployment.github.login, DSH_SUPERAGENT_GITHUB_COMMIT_EMAIL: deployment.github.noreply, DSH_SUPERAGENT_GITHUB_NUMBER: number ? String(number) : '',
+      return { DSH_SUPERAGENT_GITHUB_BINDING: trigger?.source === SOURCE && typeof trigger.meta.bindingId === 'string'
+        ? trigger.meta.bindingId : 'default',
+        DSH_SUPERAGENT_GITHUB_REPOSITORY: deployment.repository, DSH_SUPERAGENT_GITHUB_ACCOUNT: deployment.github.login,
+        DSH_SUPERAGENT_GITHUB_COMMIT_EMAIL: deployment.github.noreply, DSH_SUPERAGENT_GITHUB_NUMBER: number ? String(number) : '',
         DSH_SUPERAGENT_GITHUB_PR_HEAD: number && trigger?.meta.isPr === true ? `refs/pull/${number}/head` : '' }
     },
   },
   facts: (deployment): Record<string, Localized | string> => deployment ? {
     cli: { zh: `当前账号 @${deployment.github.login}`, en: `Current account @${deployment.github.login}` },
+    bindings: Object.entries(deployment.githubBindings ?? {}).map(([id, binding]) =>
+      `${id}: @${binding.github.login}`).join(' · '),
   } : {},
 }
 export const name = 'dsh-superagent-github'
@@ -133,7 +174,18 @@ async function watch(ctx: SourceContext, signal: AbortSignal): Promise<void> {
   while (!signal.aborted) {
     const config = ctx.config<GithubConfig>(SOURCE)
     try {
-      if (config) interval = await pollRound(ctx, signal)
+      if (config) {
+        const failures: string[] = []
+        interval = 60
+        for (const id of [undefined, ...config.bindings.map(binding => binding.id)]) {
+          if (signal.aborted) break
+          try { interval = Math.max(interval, await pollRound(githubBindingContext(ctx, id), signal)) }
+          catch (error) { failures.push(`${id ?? 'default'}: ${String(error)}`) }
+        }
+        if (failures.length) throw new Error(failures.join('; '))
+        if (config.bindings.length) ctx.report('github', { state: 'ready', detail: `${config.bindings.length + 1} repositories ready`,
+          at: new Date().toISOString() })
+      }
       else ctx.report('github', health('paused', 'sourceOff'))
       failures = 0
     } catch (error) {
@@ -144,6 +196,9 @@ async function watch(ctx: SourceContext, signal: AbortSignal): Promise<void> {
     await pause(Math.max(interval, ctx.config<GithubConfig>(SOURCE)?.pollSeconds ?? 60) * 1000, signal)
   }
 }
+const bindingIdOf = (ctx: SourceContext): string | undefined => (ctx as GithubContext).bindingId
+const githubReadRef = (ctx: SourceContext, path: string): string =>
+  `github/${bindingIdOf(ctx) ? `${bindingIdOf(ctx)}/` : ''}${path}`
 interface Round {
   started: string; signal?: AbortSignal | undefined
   pulls: Map<number, Promise<Pull>>; read: Set<number>; failures: string[]; dropped: number[]; abandoned: number[]
@@ -229,7 +284,7 @@ async function readStream(ctx: SourceContext, round: Round, id: string, path: st
       const issue = IssueSchema.safeParse(item)
       const pr = issue.success && !!issue.data.pull_request
       if (!issue.success || !fresh(issue.data.created_at, pr ? 'pulls' : 'issues')) continue
-      await ctx.receive(pr ? pullTrigger(issue.data, login) : issueTrigger(issue.data, login))
+      await ctx.receive(pr ? pullTrigger(issue.data, login, bindingIdOf(ctx)) : issueTrigger(issue.data, login, bindingIdOf(ctx)))
       nameThread(ctx, issue.data.number, issue.data.title)
       continue
     }
@@ -237,7 +292,7 @@ async function readStream(ctx: SourceContext, round: Round, id: string, path: st
     if (!number || !fresh(item.updated_at ?? item.created_at, 'comments')) continue
     const isPr = id === 'review-comments' || /\/pull\//.test(item.html_url ?? '')
     const ref = { number, isPr, ...item.html_url ? { url: item.html_url } : {} }
-    const trigger = commentTrigger(item, ref, id === 'comments' ? 'conversation' : 'inline', login)
+    const trigger = commentTrigger(item, ref, id === 'comments' ? 'conversation' : 'inline', login, bindingIdOf(ctx))
     if (trigger.text) await ctx.receive(trigger)
   }
   const newest = Math.max(...items.map(item => Date.parse(item.updated_at ?? '')).filter(Number.isFinite))
@@ -263,9 +318,9 @@ async function pollBranchCi(ctx: SourceContext, round: Round): Promise<void> {
   let revision = previous?.revision ?? 0
   if (known && JSON.stringify(now) !== JSON.stringify(known)) {
     revision += 1
-    const summary = ciSummary(snapshot, branch, `github/commits/${head.sha}/checks`)
+    const summary = ciSummary(snapshot, branch, githubReadRef(ctx, `commits/${head.sha}/checks`))
     const url = `https://github.com/${ctx.deployment.repository}/commit/${head.sha}`
-    await ctx.receive(branchCiTrigger(branch, head.sha, revision, summary, url))
+    await ctx.receive(branchCiTrigger(branch, head.sha, revision, summary, url, bindingIdOf(ctx)))
     ctx.threads.describe(`github:ci:${branch}`, { label: `CI on ${branch}`, facts: { ci: ciFact(counts) } })
   }
   ctx.state.set(KV.github.branchCi, { branch, failures: now, revision })
@@ -353,7 +408,7 @@ async function readNotified(ctx: SourceContext, round: Round, number: number, it
       // A mention added by a later edit to the body is not read: only the author can be the actor of the body.
       const { login } = ctx.deployment.github
       const opened = Date.parse(issue.created_at) >= Date.parse(since) && !sameName(issue.user.login, login)
-      if (opened) await ctx.receive(issueTrigger(issue, login))
+      if (opened) await ctx.receive(issueTrigger(issue, login, bindingIdOf(ctx)))
       await intakeComments(ctx, { number, isPr: false, url: issue.html_url }, since, round)
       nameThread(ctx, number, issue.title)
     }
@@ -364,7 +419,7 @@ async function readNotified(ctx: SourceContext, round: Round, number: number, it
     const { login } = ctx.deployment.github
     if (pr.created_at && Date.parse(pr.created_at) >= Date.parse(since) && !sameName(pr.user.login, login)) {
       const opened = { number, title: pr.title ?? '', body: pr.body, user: pr.user, created_at: pr.created_at, html_url: pr.html_url }
-      await ctx.receive(pullTrigger(opened, login))
+      await ctx.receive(pullTrigger(opened, login, bindingIdOf(ctx)))
     }
     await intakeComments(ctx, { number, isPr: true, url: pr.html_url, prAuthor: pr.user.login }, since, round)
     if (pr.title) nameThread(ctx, number, pr.title)
@@ -396,7 +451,7 @@ async function intakeComments(ctx: SourceContext, ref: PullRef, since: string, r
       if (!Number.isFinite(timestamp) || timestamp < Date.parse(since)) continue
       if (sameName(comment.user.login, login)) continue
       // A review decision without a body still reaches the ticket: a worker may be waiting for that approval.
-      const trigger = commentTrigger(comment, ref, kind, login)
+      const trigger = commentTrigger(comment, ref, kind, login, bindingIdOf(ctx))
       if (trigger.text) await ctx.receive(trigger)
     }
   }
@@ -418,7 +473,8 @@ async function pollChecks(ctx: SourceContext, round: Round, number: number, pr: 
   const previous = ctx.state.get(KV.github.ci(number))
   if (previous?.fingerprint === fingerprint) return
   const revision = previous ? previous.revision + 1 : 0
-  if (previous) await ctx.receive(ciTrigger(pr, revision, ciSummary(snapshot, `PR #${number}`, `github/pulls/${number}/checks`)))
+  if (previous) await ctx.receive(ciTrigger(pr, revision, ciSummary(snapshot, `PR #${number}`,
+    githubReadRef(ctx, `pulls/${number}/checks`)), bindingIdOf(ctx)))
   ctx.state.set(KV.github.ci(number), { fingerprint, revision })
   ctx.threads.describe(`github:${number}`, { facts: { ci: ciFact(ciCounts(snapshot)) } })
 }

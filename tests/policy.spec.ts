@@ -64,6 +64,39 @@ describe('gate', () => {
     expect(anyoneAllowed(base)).toBe(true)
     expect(anyoneAllowed(SettingsSchema.parse({}))).toBe(false)
   })
+  it('keeps allowed GitHub requesters and admission rules separate for an additional repository', () => {
+    const settings = SettingsSchema.parse({ ...base,
+      sources: { ...base.sources, github: { enabled: true, config: { repository: 'acme/widgets', cli: 'gh',
+        bindings: [{ id: 'other', repository: 'acme/other', cli: 'other-gh' }] } } },
+      policy: { ...base.policy, sources: { ...base.policy.sources, github: {
+        allowed: [{ id: 'Alice' }], allowedBindings: [{ bindingId: 'other', id: 'Bob' }],
+        admission: { issues: { unlistedAddressed: 'explicit' } },
+      } } } })
+    const bound = (login: string) => ({ ...github(login, 'mention'),
+      threads: [{ source: 'github', id: 'other:1' }], meta: { number: 1, isPr: false, kind: 'issue', bindingId: 'other' } })
+    const current = setup(settings).policy
+    const admitted = current.gate(bound('Bob'), thread(), [])
+    expect(admitted).toMatchObject({ admissible: true, strength: 'explicit',
+      basis: { sender: 'Bob', scope: { bindingId: 'other' } } })
+    if (!admitted.admissible) throw new Error('Expected an admissible GitHub request')
+    const mandate = { strength: admitted.strength, policyVersion: 'v', basis: admitted.basis,
+      actor: { source: 'github', id: 'Bob' }, scope: '' }
+    expect(current.revalidate(mandate)).toBe(true)
+    const revoked = SettingsSchema.parse({ ...settings, policy: { ...settings.policy,
+      sources: { ...settings.policy.sources, github: { ...settings.policy.sources.github!, allowedBindings: [] } } } })
+    expect(setup(revoked).policy.revalidate(mandate)).toBe(false)
+    expect(current.gate(bound('Alice'), thread(), [])).toEqual({ admissible: false, reason: 'not_a_member' })
+    expect(setup(settings).sources.scope(bound('Bob'))).toMatchObject({ row: 'other:issues' })
+    expect(current.gate({ ...github('Bob', 'mention'), meta: { number: 1, isPr: false, kind: 'issue' } }, thread(), []))
+      .toMatchObject({ admissible: true, strength: 'explicit',
+      basis: { via: 'admission' } })
+    const boundAdmission = SettingsSchema.parse({ ...settings, policy: { ...settings.policy,
+      sources: { ...settings.policy.sources, github: { ...settings.policy.sources.github!,
+        admission: { ...settings.policy.sources.github!.admission,
+          'other:issues': { unlistedAddressed: 'inferred' } } } } } })
+    expect(setup(boundAdmission).policy.gate(bound('Alice'), thread(), []))
+      .toMatchObject({ admissible: true, strength: 'inferred', basis: { row: 'other:issues' } })
+  })
   it('assesses follow-ups on Threads with Tickets, explicit from an allowed sender and inferred from anyone else', () => {
     const quiet = { meta: { chatId: CHAT, direct: false, mentioned: false } }
     expect(policy.gate(unaddressed({ ...quiet, actor: { source: 'feishu', id: 'ou_guest' } }), thread(['ticket']), [])).toMatchObject({ admissible: true, strength: 'inferred', basis: { via: 'followup' } })

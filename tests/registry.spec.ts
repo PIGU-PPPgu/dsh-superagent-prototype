@@ -25,7 +25,7 @@ describe('Source registry', () => {
     const sources = new SourceRegistry(() => settings)
     sources.register(probe); sources.register(githubKind)
     expect(sources.instances()).toEqual([
-      { id: 'github', kind: 'github', enabled: true, config: { repository: '', cli: '', pollSeconds: 60, failuresBeforeError: 3,
+      { id: 'github', kind: 'github', enabled: true, config: { repository: '', cli: '', bindings: [], pollSeconds: 60, failuresBeforeError: 3,
         observeIssues: false, observePulls: false, observeComments: false, observeCi: false }, installed: true },
       { id: 'probe', kind: 'probe', enabled: false, config: { interval: 9 }, installed: true },
       { id: 'retired', kind: 'retired', enabled: true, config: { x: 1 }, installed: false },
@@ -115,6 +115,18 @@ describe('Source registry', () => {
     expect(sources.find('see om_abc and om_abc, om_def')).toEqual({ threads: [], terms: ['om_abc', 'om_def'] })
     expect(sources.find('login fails')).toEqual({ threads: [], terms: [] })
     expect(feishuKind.policy!.unnamed).toEqual({ person: { zh: '飞书用户', en: 'Feishu user' }, bot: { zh: '飞书机器人', en: 'Feishu bot' } })
+  })
+  it('keeps GitHub references in the repository binding that owns the source trigger', () => {
+    const settings = SettingsSchema.parse({ sources: { github: { enabled: true, config: {
+      repository: 'acme/widgets', cli: 'gh', bindings: [{ id: 'other', repository: 'acme/other', cli: 'gh-other' }],
+    } } } })
+    const sources = new SourceRegistry(() => settings)
+    sources.register(githubKind)
+    const origin = { source: 'github', meta: { bindingId: 'other' } } as never
+    expect(sources.find('#12', origin).threads).toEqual(['github:other:12'])
+    expect(sources.find('https://github.com/acme/other/issues/7', origin).threads).toEqual(['github:other:7'])
+    expect(sources.find('https://github.com/acme/widgets/issues/7', origin).threads).toEqual(['github:7'])
+    expect(sources.find('https://github.com/elsewhere/repo/issues/7', origin).threads).toEqual([])
   })
   it('refuses a second registration of one kind and forgets a kind after its disposer runs', () => {
     const sources = new SourceRegistry(() => SettingsSchema.parse({}))
