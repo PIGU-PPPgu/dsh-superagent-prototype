@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { zstdCompressSync } from 'node:zlib'
 import { afterEach, expect, it } from 'vitest'
 import { listLocalCodexInventory } from '../src/codex/local-inventory.ts'
 
@@ -76,6 +77,47 @@ it('reports unknown source kind and the file mtime when the database has no row'
   expect(threads[0]).toMatchObject({ id: '44444444-4444-4444-8444-444444444444', sourceKind: 'unknown' })
   expect(threads[0]!.updatedAt).toBe(new Date((await import('node:fs')).statSync(path).mtimeMs).toISOString())
   expect(threads[0]!.name).toBeUndefined()
+})
+
+it('uses bounded session metadata to classify a thread missing from the index', async () => {
+  const home = makeHome()
+  const id = '44444444-4444-4444-8444-444444444445'
+  rollout(home, 'sessions', id, JSON.stringify({ type: 'session_meta', payload: { id, source: 'vscode' } }) + '\n')
+  stateDatabase(home, [])
+  const threads = await listLocalCodexInventory(home, new AbortController().signal)
+  expect(threads).toHaveLength(1)
+  expect(threads[0]).toMatchObject({ id, sourceKind: 'vscode' })
+})
+
+it('excludes plain and compressed rollout aliases of an indexed conversation', async () => {
+  const home = makeHome()
+  const id = '44444444-4444-4444-8444-444444444446'
+  const plainAlias = '44444444-4444-4444-8444-444444444447'
+  const compressedAlias = '44444444-4444-4444-8444-444444444448'
+  rollout(home, 'sessions', id)
+  const metadata = JSON.stringify({ type: 'session_meta', payload: { id, source: 'vscode' } }) + '\n'
+  rollout(home, 'sessions', plainAlias, metadata)
+  const compressed = rollout(home, 'archived_sessions', compressedAlias)
+  writeFileSync(compressed + '.zst', zstdCompressSync(Buffer.from(metadata)))
+  rmSync(compressed)
+  stateDatabase(home, [{ id, source: 'vscode' }])
+
+  const threads = await listLocalCodexInventory(home, new AbortController().signal)
+  expect(threads).toHaveLength(1)
+  expect(threads[0]).toMatchObject({ id, archived: false, sourceKind: 'vscode' })
+})
+
+it('retains an unmatched rollout alias as an unknown coverage gap', async () => {
+  const home = makeHome()
+  const alias = '44444444-4444-4444-8444-444444444449'
+  const missing = '44444444-4444-4444-8444-444444444450'
+  rollout(home, 'sessions', alias, JSON.stringify({ type: 'session_meta',
+    payload: { id: missing, source: 'vscode' } }) + '\n')
+  stateDatabase(home, [])
+
+  const threads = await listLocalCodexInventory(home, new AbortController().signal)
+  expect(threads).toHaveLength(1)
+  expect(threads[0]).toMatchObject({ id: alias, sourceKind: 'unknown' })
 })
 
 it('keeps a thread that appears in both directories and marks it archived', async () => {

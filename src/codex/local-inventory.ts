@@ -1,7 +1,9 @@
 /** Read-only discovery of local Codex rollout files joined with the Codex state database. */
 import { DatabaseSync } from 'node:sqlite'
+import { createReadStream } from 'node:fs'
 import { lstat, readdir, realpath } from 'node:fs/promises'
 import { join } from 'node:path'
+import { createZstdDecompress } from 'node:zlib'
 import type { MonitoredCodexThread } from './monitor-read.ts'
 
 // Codex names a rollout file `rollout-<time>-<uuid>.jsonl`, optionally zstd compressed as `.jsonl.zst`.
@@ -12,6 +14,7 @@ const MAX_DEPTH = 8
 const MAX_FILES = 200_000
 const QUERY_CHUNK = 400
 const MAX_NAME = 200
+const MAX_META_BYTES = 128 * 1024
 
 interface RolloutFile {
   id: string
@@ -159,12 +162,45 @@ function openStateDatabase(path: string, ids: string[]): Map<string, ThreadRow> 
   } finally { db.close() }
 }
 
+/** Reads only a bounded first metadata record for files absent from the state index. */
+async function readSessionMeta(file: RolloutFile, signal: AbortSignal): Promise<{ id: string; source?: string } | undefined> {
+  const input = createReadStream(file.path)
+  const stream = file.path.endsWith('.zst') ? input.pipe(createZstdDecompress()) : input
+  const chunks: Buffer[] = []
+  let length = 0
+  try {
+    for await (const chunk of stream) {
+      checkCancelled(signal)
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+      const end = bytes.indexOf(10)
+      const part = bytes.subarray(0, end < 0 ? bytes.length : end)
+      length += part.length
+      if (length > MAX_META_BYTES) return undefined
+      chunks.push(part)
+      if (end >= 0) break
+    }
+    const record = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>
+    if (record.type !== 'session_meta' || !record.payload || typeof record.payload !== 'object') return undefined
+    const payload = record.payload as Record<string, unknown>
+    if (typeof payload.id !== 'string') return undefined
+    const source = payload.source
+    return { id: payload.id.toLowerCase(), ...(typeof source === 'string' ? { source }
+      : source && typeof source === 'object' ? { source: JSON.stringify(source) } : {}) }
+  } catch {
+    checkCancelled(signal)
+    return undefined
+  } finally {
+    stream.destroy()
+    input.destroy()
+  }
+}
+
 /**
  * Lists the Codex threads that are stored on this machine.
  *
  * Rollout files under `<codexHome>/sessions` and `<codexHome>/archived_sessions` are enumerated without
- * reading their content. Metadata comes from `<codexHome>/state_5.sqlite`, opened read-only. Threads without
- * a database row keep `sourceKind: 'unknown'` and use the file mtime as `updatedAt`.
+ * reading conversation content. Metadata comes from `<codexHome>/state_5.sqlite`, opened read-only. For files
+ * without a database row, only a bounded first metadata record is checked to exclude renamed duplicates.
  */
 export async function listLocalCodexInventory(codexHome: string, signal: AbortSignal): Promise<MonitoredCodexThread[]> {
   checkCancelled(signal)
@@ -187,11 +223,25 @@ export async function listLocalCodexInventory(codexHome: string, signal: AbortSi
     })
   }
 
-  return [...merged.values()]
+  const verified: RolloutFile[] = []
+  const fallback = new Map<string, { id: string; source?: string }>()
+  for (const file of merged.values()) {
+    checkCancelled(signal)
+    if (metadata.has(file.id)) { verified.push(file); continue }
+    const meta = await readSessionMeta(file, signal)
+    // Exclude a renamed copy only when the canonical rollout is present too.
+    // Otherwise retain an unknown row so the coverage gap stays visible.
+    if (meta && meta.id !== file.id && merged.has(meta.id)) continue
+    if (meta?.id === file.id) fallback.set(file.id, meta)
+    verified.push(file)
+  }
+
+  return verified
     .sort((left, right) => left.id.localeCompare(right.id))
     .map(file => {
       const row = metadata.get(file.id)
-      const source = normalizeSource(row?.source)
+      const sourceValue = row?.source ?? fallback.get(file.id)?.source
+      const source = normalizeSource(sourceValue)
       // A live rollout can advance before Codex refreshes its metadata index.
       const updatedAt = new Date(Math.max(row?.updatedAt ? row.updatedAt * 1000 : 0, file.mtimeMs)).toISOString()
       const parentThreadId = row?.parentThreadId ?? source.parentThreadId
@@ -200,7 +250,7 @@ export async function listLocalCodexInventory(codexHome: string, signal: AbortSi
         ...(row?.name ? { name: row.name } : {}),
         updatedAt,
         archived: file.archived,
-        sourceKind: row?.source ? source.sourceKind : 'unknown',
+        sourceKind: sourceValue ? source.sourceKind : 'unknown',
         ...(parentThreadId ? { parentThreadId } : {}),
       }
     })
