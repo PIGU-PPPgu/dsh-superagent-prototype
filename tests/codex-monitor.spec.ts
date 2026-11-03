@@ -48,6 +48,7 @@ function fixture() {
   let updatedAtOverride: number | undefined
   let localRows: MonitoredCodexThread[] = []
   let decisionText: string | undefined
+  let finishKind = 'stop'
   let modelGate: Promise<void> | undefined
   const requests: string[] = []
   const rpc = {
@@ -93,7 +94,7 @@ function fixture() {
   const stream = vi.fn(async function* () {
     await modelGate
     yield { type: 'text-delta', index: 0, text: decisionText ?? (phase ? reviewDecision : progressDecision) }
-    yield { type: 'finish', reason: { kind: 'stop' } }
+    if (finishKind) yield { type: 'finish', reason: { kind: finishKind } }
   })
   const context = { llm: { stream }, sessionController: { modelCatalog: async () =>
     ({ default: { provider: 'magpie', model: 'test-model' } }) } } as unknown as CodexMonitorDeps['context']
@@ -120,6 +121,7 @@ function fixture() {
     setUpdatedAt: (value: string) => { updatedAtOverride = Date.parse(value) / 1000 },
     setLocalRows: (rows: MonitoredCodexThread[]) => { localRows = rows },
     setDecision: (value: string) => { decisionText = value },
+    setFinishKind: (value: string) => { finishKind = value },
     holdModel: () => {
       let release!: () => void
       modelGate = new Promise<void>(resolve => { release = resolve })
@@ -347,6 +349,23 @@ it('summarizes existing conversations and alerts on later assistant action', asy
   await restarted.scanOnce()
   expect(stream).toHaveBeenCalledTimes(2)
   expect(restarted.view().attentionTotal).toBe(0)
+})
+
+it('uses a complete, validated decision when the model reaches its token limit', async () => {
+  const { monitor, setFinishKind } = fixture()
+  setFinishKind('max-tokens')
+  await monitor.scanOnce()
+  expect(monitor.view().threads[0]).toMatchObject({ stage: 'progress', summary: '正在处理发布任务' })
+  expect(monitor.view().threads[0]?.error).toBeUndefined()
+})
+
+it('rejects failed, aborted and missing model finishes even when the JSON is complete', async () => {
+  for (const kind of ['error', 'aborted', '', 'length']) {
+    const { monitor, setFinishKind } = fixture()
+    setFinishKind(kind)
+    await monitor.scanOnce()
+    expect(monitor.view().threads[0]?.error).toBe('Codex model analysis unavailable')
+  }
 })
 
 it('preserves the previous checkpoint when an incremental read fails', async () => {
@@ -671,17 +690,23 @@ it('does not replay a recent historical request after its first baseline read fa
   expect(monitor.view().threads[0]?.stage).toBe('unknown')
 })
 
-it('keeps the checkpoint and shows a coverage gap when the incremental anchor disappears', async () => {
-  const { monitor, stream, setPhase, setMissingAnchor } = fixture()
+it('rebaselines a lost incremental anchor without dispatching missed history', async () => {
+  const { monitor, stream, autoHandoff, setDecision, setPhase, setMissingAnchor } = fixture()
+  monitor.setEnabled(true)
   await monitor.scanOnce()
+  monitor.setAutoHandoff(true)
+  setDecision(JSON.stringify({ needsAttention: true, stage: 'failed', kind: 'failure',
+    reason: '执行失败', action: '检查失败', summary: '历史失败', evidence: '请检查发布结果' }))
   setPhase(1)
   setMissingAnchor(true)
   await monitor.scanOnce()
   expect(stream).toHaveBeenCalledTimes(1)
-  expect(monitor.view().threads[0]?.error).toContain('safe window')
-  setMissingAnchor(false)
+  expect(monitor.view().threads[0]?.error).toContain('new baseline')
   await monitor.scanOnce()
   expect(stream).toHaveBeenCalledTimes(2)
+  expect(monitor.view().threads[0]?.error).toBeUndefined()
+  expect(monitor.view().threads[0]?.stage).toBe('unknown')
+  expect(autoHandoff).not.toHaveBeenCalled()
 })
 
 it('rescans after five minutes even when Codex updatedAt has not advanced', async () => {

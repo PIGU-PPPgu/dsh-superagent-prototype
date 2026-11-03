@@ -21,7 +21,7 @@ const CHILD_STATUS_HOURS = 24
 const CHILD_STATUS_PER_SCAN = 60
 const CHILD_STATUS_CONCURRENCY = 8
 const MonitorKey = record<StoredMonitor>('codex-monitor-v1')
-const AuditKey = family<{ at: string; model: string; prompt: string; response: string }, [threadId: string, itemId: string]>(
+const AuditKey = family<{ at: string; model: string; prompt: string; response: string; finish?: string }, [threadId: string, itemId: string]>(
   'codex-monitor-audit:')
 
 interface StoredMessage { id: string; turnId?: string; role: 'user' | 'assistant'; text: string }
@@ -474,8 +474,18 @@ export class CodexMonitor {
           readDone = true
           if (previous?.baselined && !recent.complete) {
             signal.throwIfAborted()
-            this.commitThread(candidate.id, { ...previous, ...candidate, seenAt, present: true,
-              error: 'Codex history delta exceeded the safe window' })
+            const anchor = recent.newestItemId
+            this.commitThread(candidate.id, anchor && anchor !== previous.lastItemId
+              ? { ...previous, ...candidate, seenAt, checkedAt: seenAt, present: true,
+                context: contextOf([], recent.messages), lastItemId: anchor,
+                lastAssistantItemId: recent.latestAssistantItemId,
+                latestTurnId: recent.latestTurnId ?? previous.latestTurnId,
+                latestTurnStatus: recent.latestTurnStatus ?? previous.latestTurnStatus,
+                assessment: undefined, attention: undefined,
+                autoHandoffFreshItemId: undefined, autoHandoffReadComplete: false,
+                error: 'Codex history gap; latest items became the new baseline' }
+              : { ...previous, ...candidate, seenAt, present: true,
+                error: 'Codex history delta exceeded the safe window' })
             continue
           }
           const context = contextOf(previous?.context ?? [], recent.messages)
@@ -630,9 +640,11 @@ export class CodexMonitor {
         if (chunk.type === 'finish') finish = chunk.reason.kind
       }
     } finally {
-      this.deps.store.set(AuditKey(threadId, itemId), { at, model, prompt, response })
+      this.deps.store.set(AuditKey(threadId, itemId), { at, model, prompt, response,
+        ...(finish ? { finish } : {}) })
     }
-    if (finish !== 'stop') throw new Error('Codex triage model did not finish')
+    signal.throwIfAborted()
+    if (finish !== 'stop' && finish !== 'max-tokens') throw new Error('Codex triage model did not finish successfully')
     const decision = parseCodexTriageDecision(response.trim(), input)
     if (!decision.stage || !decision.summary) throw new Error('Codex triage result lacks progress')
     return decision
