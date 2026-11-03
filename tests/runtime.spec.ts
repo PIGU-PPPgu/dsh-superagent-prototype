@@ -9,6 +9,7 @@ import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import { Runtime } from '../src/app/runtime.ts'
 import type { CodexMonitor } from '../src/app/codex-monitor.ts'
+import { CodexDesktopIpc } from '../src/codex/desktop-ipc.ts'
 import { jobRegistry } from './fixtures/host.ts'
 import { evalsHealth } from '../src/app/views/overview.ts'
 import { mandateInstructions } from '../src/executor/dsh.ts'
@@ -289,13 +290,15 @@ it('lets the DSH Router queue a stale-guarded Codex follow-up without answering 
   } } }
   runtime.store.set('codex-monitor-v1', state)
   runtime.codexControl.setEnabled(true)
+  runtime.codexControl.setBridgeAvailable(true)
   const head = await runTool(runtime.masterId, 'orchestrator_codex_route', { operation: 'head', thread_id: 'thread-router' })
   expect(head.head).toMatchObject({ lastItemId: 'item-head', ready: true, needsYou: false })
   await expect(runTool(runtime.masterId, 'orchestrator_codex_route', { operation: 'followup', thread_id: 'thread-router',
     base_item_id: 'old-item', reason: 'Continue the build' })).rejects.toThrow('changed')
   const queued = await runTool(runtime.masterId, 'orchestrator_codex_route', { operation: 'followup', thread_id: 'thread-router',
-    base_item_id: 'item-head', reason: 'Continue the build', priority: 2 })
+    base_item_id: 'item-head', reason: 'Continue the build', message: 'Report the build result and continue authorized work', priority: 2 })
   expect(queued.intent).toMatchObject({ status: 'queued', priority: 2, threadId: 'thread-router' })
+  expect((queued.intent as { text: string }).text).toContain('Report the build result and continue authorized work')
   expect(runtime.codexControl.view().intents).toHaveLength(1)
   expect(runtime.store.tickets.list()).toEqual([])
   runtime.store.set('codex-monitor-v1', { ...state, threads: { 'thread-router': { ...state.threads['thread-router'],
@@ -317,6 +320,23 @@ it('lets the DSH main Session inspect bounded Codex history through its read-onl
   expect(read).toHaveBeenCalledWith('thread-a', 3, expect.any(AbortSignal))
 })
 
+it('lets the DSH main Session query authoritative Desktop status without returning snapshot contents', async () => {
+  runtime.store.set('codex-monitor-v1', { version: 1, enabled: true, initialized: true, threads: {
+    'thread-a': { id: 'thread-a', sourceKind: 'vscode', present: true, archived: false, seenAt: '', context: [] },
+  } })
+  const close = vi.fn(), readState = vi.fn(async () => ({ status: 'active', pendingRequests: 1,
+    activeTurnId: 'turn-a', permissionsHash: 'private', settingsHash: 'private', cwd: '/private' }))
+  const connect = vi.spyOn(CodexDesktopIpc, 'connect').mockResolvedValue({ close, readState } as unknown as CodexDesktopIpc)
+  const result = await runTool(runtime.masterId, 'orchestrator_codex_route', { operation: 'status', thread_id: 'thread-a' })
+  expect(result).toMatchObject({ source: 'Codex Desktop owner', available: true, status: 'active',
+    activeTurnId: 'turn-a', pendingRequests: 1 })
+  expect(JSON.stringify(result)).not.toContain('private')
+  expect(close).toHaveBeenCalledOnce()
+  await expect(runTool(runtime.masterId, 'orchestrator_codex_route', { operation: 'status', thread_id: 'unknown' }))
+    .rejects.toThrow('not monitored')
+  expect(connect).toHaveBeenCalledOnce()
+})
+
 it('keeps a Codex conversation with an active DSH Ticket out of the native route queue', async () => {
   const candidate = { threadId: 'thread-owned', itemId: 'assistant-owned', title: 'Build failed',
     summary: 'Build failed', evidence: 'Build failed', repository: 'acme/widgets',
@@ -331,6 +351,7 @@ it('keeps a Codex conversation with an active DSH Ticket out of the native route
       present: true, baselined: true, lastItemId: candidate.itemId, seenAt: '2026-11-03T05:00:00Z', context: [] },
   } })
   runtime.codexControl.setEnabled(true)
+  runtime.codexControl.setBridgeAvailable(true)
   await expect(runTool(runtime.masterId, 'orchestrator_codex_route', { operation: 'followup',
     thread_id: candidate.threadId, base_item_id: candidate.itemId, reason: 'Continue the build' }))
     .rejects.toThrow('active DSH Ticket')

@@ -14,9 +14,11 @@ import { existsSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { CodexFileMonitor } from '../codex/file-bridge.ts'
+import { CodexDesktopIpc } from '../codex/desktop-ipc.ts'
 import { CodexMonitor, type CodexFailureCandidate } from './codex-monitor.ts'
 import { CodexRouter } from './codex-router.ts'
 import { CodexControl } from './codex-control.ts'
+import { CodexDelivery } from './codex-delivery.ts'
 import { registerGithubShellEnv } from './github-shell-env.ts'
 import { lockSync } from 'proper-lockfile'
 import { Engine, key, type EngineForSettings, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
@@ -93,6 +95,7 @@ export class Runtime extends Service implements SourceHost {
   private readonly codexMonitor: CodexMonitor
   readonly codexRouter: CodexRouter
   readonly codexControl: CodexControl
+  private readonly codexDelivery: CodexDelivery
   /** Non-zero while a main-Session tool is executing an Engine command, suppressing self-triggered domain event notices. */
   private quiet = 0
   private readonly authorizedCodexHandoffs = new Set<string>()
@@ -111,7 +114,7 @@ export class Runtime extends Service implements SourceHost {
       this.codexControl = new CodexControl({ store, stateDir: machine.stateDir })
       this.codexMonitor = new CodexMonitor({ store, context: ctx,
         autoHandoff: (candidate, signal) => this.acceptCodexFailure(candidate, signal),
-        onScan: () => { try { this.codexControl.sync(); this.codexRouter.refresh() }
+        onScan: () => { try { this.codexControl.sync(); this.codexRouter.refresh(); void this.codexDelivery.request().catch(report) }
           catch (error) { ctx.logger.warn('dsh-superagent Codex Router refresh failed: %s', String(error)) } } })
       this.codexRouter = new CodexRouter({ store, monitor: this.codexMonitor,
         relay: (id, text) => this.sessions.relay(id, text) })
@@ -152,6 +155,9 @@ export class Runtime extends Service implements SourceHost {
         lifetime: this.lifetime,
         closing: () => this.closing(), environment,
         tools: (agent, ticket) => ticket ? executorTools(this.toolHost, ticket) : mainTools(this.toolHost, agent) })
+      this.codexDelivery = new CodexDelivery({ control: this.codexControl, monitor: this.codexMonitor, signal: this.lifetime,
+        paused: () => this.paused() || this.closing() || !this.codexMonitor.view(0, 1).enabled,
+        relay: (id, text) => sessions.relay(id, text) })
       const policyChanged: EngineForSettings['policyChanged'] = (from, to, effects) => { this.engine.policyChanged(from, to, effects) }
       this.settings = new Settings({ store, sources, engine: { policyChanged }, health: board, context: ctx, lifetime: this.lifetime, sessions,
         sourceHost: this, setup, requestPass: () => { this.passes.request() } })
@@ -205,6 +211,18 @@ export class Runtime extends Service implements SourceHost {
         get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem }, receive: trigger => passes.receive(trigger) }
       this.toolHost = { context: ctx, engine, store, prompts, sessions, settings: this.settings, assessor, resources,
         codexMonitor: this.codexMonitor, codexControl: this.codexControl,
+        codexDesktopStatus: async (threadId, caller) => {
+          const head = this.codexMonitor.routeHead(threadId)
+          if (!this.codexMonitor.view(0, 1).enabled || !head?.present) throw new Error('Codex main conversation is not monitored')
+          const signal = AbortSignal.any([caller, this.lifetime])
+          const client = await CodexDesktopIpc.connect({ signal })
+          try {
+            const state = await client.readState(threadId, signal)
+            return { source: 'Codex Desktop owner', readAt: now(), available: !!state,
+              ...(state ? { status: state.status, pendingRequests: state.pendingRequests,
+                ...(state.activeTurnId ? { activeTurnId: state.activeTurnId } : {}) } : {}) }
+          } finally { client.close() }
+        },
         ...(codex ? { codex } : {}),
         get github() { return runtime.context({ kind: 'github', health: ['github'] }) },
         requestPass: () => { passes.request() }, sendReplies: () => outbox.sent(),
@@ -357,6 +375,7 @@ export class Runtime extends Service implements SourceHost {
     this.closingFlag = true; const passes = this.passes.stop(); this.stopped.abort()
     try {
       await this.codexMonitor.stop()
+      await this.codexDelivery.stop()
       this.assessor.stop()
       const ids = [this.masterId, ...this.store.tickets.list().map(ticket => workerSessionId(ticket.id))]
       const agents = ids.map(id => this.ctx.agents.get(id as SessionId)).filter((agent): agent is Agent => agent !== undefined)

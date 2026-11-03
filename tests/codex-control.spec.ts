@@ -45,13 +45,17 @@ it('persists ordered Codex follow-ups and never resends an uncertain dispatch', 
       status: 'sent', at: now.toISOString() }))
     control.sync()
     expect(control.view().intents.find(intent => intent.id === first.id)?.status).toBe('sent')
+    writeFileSync(receipt, JSON.stringify({ version: 1, intentId: first.id, threadId: first.threadId,
+      status: 'dispatching', at: '2026-11-03T05:03:00Z' }))
+    control.sync()
+    expect(control.view().intents.find(intent => intent.id === first.id)?.status).toBe('sent')
     expect(() => control.cancel(first.id)).toThrow('Only queued')
     control.setEnabled(false)
     expect(queue().actions).toEqual([])
   } finally { store.close() }
 })
 
-it('lets the native bridge claim a queued intent exactly once and report its receipt', () => {
+it('lets DSH claim once and disables every legacy external write command', () => {
   const directory = mkdtempSync(join(tmpdir(), 'codex-bridge-'))
   directories.push(directory)
   const store = new Store(join(directory, 'orchestrator.sqlite'))
@@ -62,18 +66,18 @@ it('lets the native bridge claim a queued intent exactly once and report its rec
       text: 'Continue the task.', reason: 'Router decision', source: 'router' })
     const script = join(process.cwd(), 'scripts', 'codex-control-bridge.mjs')
     const call = (...args: string[]) => JSON.parse(execFileSync(process.execPath,
-      [script, ...args], { encoding: 'utf8' })) as Record<string, unknown>
+      [script, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })) as Record<string, unknown>
     expect(call('list', directory).actions).toMatchObject([{ id: intent.id }])
-    expect(call('claim', directory, intent.id)).toMatchObject({ id: intent.id })
+    for (const command of ['claim', 'sent', 'failed', 'heartbeat']) expect(() => call(command, directory, intent.id)).toThrow()
+    expect(control.claim(intent.id)).toMatchObject({ id: intent.id, status: 'dispatching', deliveryId: expect.any(String) })
     expect(call('list', directory).actions).toEqual([])
-    expect(() => call('claim', directory, intent.id)).toThrow()
+    expect(() => control.claim(intent.id)).toThrow('no longer queued')
     expect(() => control.cancel(intent.id)).toThrow('Only queued')
-    expect(call('sent', directory, intent.id)).toMatchObject({ status: 'sent' })
-    expect(call('sent', directory, intent.id)).toMatchObject({ status: 'sent' })
-    expect(() => call('failed', directory, intent.id, 'late error')).toThrow()
+    expect(control.finish(intent.id, 'sent')).toMatchObject({ status: 'sent' })
+    expect(() => control.finish(intent.id, 'failed')).toThrow('not dispatching')
     control.sync()
     expect(control.view().intents[0]?.status).toBe('sent')
-    expect(call('heartbeat', directory)).toEqual({ ready: true })
+    control.setBridgeAvailable(true)
     expect(control.view().bridgeReady).toBe(true)
     const later = control.enqueue({ threadId: 'thread-two', basedOnItemId: 'item-two',
       text: 'Review the latest user task.', reason: 'Router decision', source: 'router' })
@@ -81,7 +85,7 @@ it('lets the native bridge claim a queued intent exactly once and report its rec
     const staleProjection = readFileSync(join(control.directory, 'queue.json'), 'utf8')
     control.setEnabled(false)
     writeFileSync(join(control.directory, 'queue.json'), staleProjection, { mode: 0o600 })
-    expect(() => call('claim', directory, later.id)).toThrow()
+    expect(() => control.claim(later.id)).toThrow()
     control.setEnabled(true)
     const retried = control.enqueue({ threadId: 'thread-two', basedOnItemId: 'item-two',
       text: 'Review the latest user task.', reason: 'Router decision', source: 'router' })
@@ -105,8 +109,7 @@ it('refuses a stale native claim after a DSH Ticket takes ownership of the conve
     store.triggers.save(origin)
     store.tickets.save({ id: 'ticket-one', origin: { triggerId: origin.id, triggerIds: [origin.id] },
       assignments: [], inputs: [], undelivered: [] } as unknown as Ticket)
-    const script = join(process.cwd(), 'scripts', 'codex-control-bridge.mjs')
-    expect(() => execFileSync(process.execPath, [script, 'claim', directory, intent.id], { encoding: 'utf8' })).toThrow()
+    expect(() => control.claim(intent.id)).toThrow()
     control.sync()
     expect(control.view().intents[0]?.status).toBe('cancelled')
   } finally { store.close() }

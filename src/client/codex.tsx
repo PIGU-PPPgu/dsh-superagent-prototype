@@ -113,15 +113,15 @@ export function CodexPage() {
     </section>}
 
     {control && <section>
-      <div className="dt-row-buttons"><h3>{chinese ? '会话控制' : 'Session control'}</h3>
+      <div className="dt-row-buttons"><h3>{chinese ? '会话通信' : 'Session messages'}</h3>
         <Button variant="outline" size="sm" disabled={controlToggle.busy || !control.bridgeReady && !control.enabled}
           onClick={() => { void controlToggle.run(!control.enabled) }}>
-          {control.enabled ? (chinese ? '关闭自动控制' : 'Disable control')
-            : (chinese ? '启用自动控制' : 'Enable control')}
+          {control.enabled ? (chinese ? '关闭通信' : 'Disable messaging')
+            : (chinese ? '开启通信' : 'Enable messaging')}
         </Button></div>
       <p className="dt-hint">{control.bridgeReady
-        ? (chinese ? '原生桥已连接 · 审批仍由你处理' : 'Native bridge connected · approvals stay with you')
-        : (chinese ? '等待原生桥连接；队列不会发送到 Codex' : 'Waiting for native bridge; no Codex message is sent')}</p>
+        ? (chinese ? '已连接 Codex Desktop · 审批仍由你处理' : 'Codex Desktop connected · approvals stay with you')
+        : (chinese ? '等待 Codex Desktop 连接' : 'Waiting for Codex Desktop')}</p>
       {!!control.intents.length && <ul className="dt-list dt-cards">{control.intents.slice(0, 5).map(intent =>
         <li className="dt-row" key={intent.id}><div className="dt-row-main">
           <strong>{intent.threadId}</strong>

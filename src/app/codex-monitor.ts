@@ -142,6 +142,7 @@ export interface CodexHistoryView {
   source: 'persisted Codex history'
   readAt: string
   complete: boolean
+  headItemId?: string
   messages: { id: string; turnId: string; role: 'user' | 'assistant'; text: string; chars?: number }[]
 }
 
@@ -300,6 +301,7 @@ export class CodexMonitor {
         combined.throwIfAborted()
         return { threadId, title: row.name ?? threadId, source: 'persisted Codex history',
           readAt: this.now().toISOString(), complete: recent.complete && recent.messages.length <= limit,
+          ...(recent.newestItemId ? { headItemId: recent.newestItemId } : {}),
           messages: recent.messages.slice(-limit).map(message => ({
             id: message.id, turnId: message.turnId, role: message.role, text: message.text.slice(0, 1_200),
             ...(message.text.length > 1_200 ? { chars: message.text.length } : {}) })) }

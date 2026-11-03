@@ -1,5 +1,5 @@
 /** Durable Codex control intents. A separate, native Codex bridge executes queued intents. */
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { z } from 'zod'
@@ -22,6 +22,8 @@ export interface CodexControlIntent {
   createdAt: string
   updatedAt: string
   error?: string
+  deliveryId?: string
+  turnId?: string
 }
 interface ControlState { version: 1; enabled: boolean; intents: Record<string, CodexControlIntent> }
 export interface CodexControlView {
@@ -90,6 +92,53 @@ export class CodexControl {
       })
       this.writeQueue()
       return this.view()
+    })
+  }
+  /** Publish the in-process Desktop adapter's connection probe; no model or scheduler writes this state. */
+  setBridgeAvailable(available: boolean): void {
+    this.locked(() => {
+      const path = join(this.directory, 'bridge.json')
+      if (!available) { rmSync(path, { force: true }); return }
+      const temporary = `${path}.${randomUUID()}.tmp`
+      writeFileSync(temporary, JSON.stringify({ version: 1, at: this.now(), sendMessage: true }) + '\n',
+        { mode: 0o600, flag: 'wx' })
+      renameSync(temporary, path)
+    })
+  }
+  /** Claim once before an in-process send; an uncertain dispatch is never returned to the queue. */
+  claim(id: string): CodexControlIntent {
+    return this.locked(() => {
+      this.syncUnlocked()
+      if (!this.state().enabled) throw new Error('Codex control is disabled')
+      const intent = this.update(id, value => {
+        if (value.status !== 'queued') throw new Error('Codex intent is no longer queued')
+        if (this.ownedThreads().has(value.threadId)) throw new Error('An active DSH Ticket owns this Codex conversation')
+        return { ...value, status: 'dispatching', updatedAt: this.now(), deliveryId: randomUUID() }
+      })
+      this.writeQueue()
+      return intent
+    })
+  }
+  finish(id: string, status: 'sent' | 'failed', detail?: { error?: string; turnId?: string }): CodexControlIntent {
+    return this.locked(() => {
+      const intent = this.update(id, value => {
+        if (value.status !== 'dispatching') throw new Error('Codex intent is not dispatching')
+        return { ...value, status, updatedAt: this.now(), ...detail }
+      })
+      this.writeQueue()
+      return intent
+    })
+  }
+  /** Return only a local claim proven not to have reached the wire; uncertain legacy claims are ineligible. */
+  releaseUnsent(id: string): CodexControlIntent {
+    return this.locked(() => {
+      const intent = this.update(id, value => {
+        if (value.status !== 'dispatching' || !value.deliveryId) throw new Error('Codex intent is not a local unsent claim')
+        const { deliveryId: _deliveryId, ...rest } = value
+        return { ...rest, status: this.state().enabled ? 'queued' : 'cancelled', updatedAt: this.now() }
+      })
+      this.writeQueue()
+      return intent
     })
   }
   /** Give a DSH Ticket exclusive ownership before it is created, sharing the bridge's claim lock. */

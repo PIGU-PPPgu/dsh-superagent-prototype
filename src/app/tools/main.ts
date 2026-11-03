@@ -32,6 +32,7 @@ export interface MainToolsHost {
   /** Optional, read-only view of allowlisted external Codex threads. */
   readonly codex?: { refresh(signal: AbortSignal): Promise<CodexObservation> }
   readonly codexMonitor: Pick<CodexMonitor, 'routeHead' | 'readHistory'>
+  readonly codexDesktopStatus?: (threadId: string, signal: AbortSignal) => Promise<Record<string, unknown>>
   readonly codexControl: Pick<CodexControl, 'view' | 'enqueue' | 'reorder' | 'cancel'>
   /** Schedules a pass to carry out work queued by an Engine command (such as an Eval or ticket resume). */
   requestPass(): void
@@ -166,18 +167,24 @@ function codexRouteTool(host: MainToolsHost): Tool {
   }
   return tool({
     name: 'orchestrator_codex_route',
-    description: 'Read stored Codex context; queue, reorder or cancel native follow-ups. History complete=false may omit earlier messages. No approvals or live-state assumptions.',
-    schema: z.object({ operation: z.enum(['head', 'history', 'followup', 'reorder', 'cancel']), thread_id: z.string().optional(),
+    description: 'Read Codex history or Desktop owner status; queue, reorder or cancel native follow-ups. History complete=false may omit earlier messages. Never approve requests.',
+    schema: z.object({ operation: z.enum(['head', 'history', 'status', 'followup', 'reorder', 'cancel']), thread_id: z.string().optional(),
       base_item_id: z.string().optional(), intent_id: z.string().optional(), reason: z.string().trim().min(1).max(300).optional(),
+      message: z.string().trim().min(1).max(500).optional(),
       priority: z.number().int().min(0).max(3).optional(), limit: z.number().int().min(1).max(12).optional() }).strict(),
     execute: async (args, signal) => {
       if (args.operation === 'head') return { head: host.codexMonitor.routeHead(need(args.thread_id, 'thread_id')) ?? null,
         control: host.codexControl.view() }
       if (args.operation === 'history') return host.codexMonitor.readHistory(need(args.thread_id, 'thread_id'), args.limit ?? 8, signal)
+      if (args.operation === 'status') {
+        if (!host.codexDesktopStatus) throw new Error('Codex Desktop status adapter is unavailable')
+        return host.codexDesktopStatus(need(args.thread_id, 'thread_id'), signal)
+      }
       if (args.operation === 'reorder') return { intent: host.codexControl.reorder(need(args.intent_id, 'intent_id'),
         args.priority ?? 1) }
       if (args.operation === 'cancel') return { intent: host.codexControl.cancel(need(args.intent_id, 'intent_id')) }
-      if (!host.codexControl.view().enabled) throw new Error('Codex native control bridge is not enabled')
+      const control = host.codexControl.view()
+      if (!control.enabled || !control.bridgeReady) throw new Error('Codex native delivery is not enabled and connected')
       const threadId = need(args.thread_id, 'thread_id'), itemId = need(args.base_item_id, 'base_item_id')
       const head = host.codexMonitor.routeHead(threadId)
       if (!head?.present || head.archived || !head.ready || head.lastItemId !== itemId) {
@@ -189,10 +196,12 @@ function codexRouteTool(host: MainToolsHost): Tool {
         return source?.source === 'codex' && source.meta.threadId === threadId
       })
       if (openTicket) throw new Error('An active DSH Ticket already owns this Codex conversation')
-      const observed = head.summary ? `Historical summary: ${JSON.stringify(head.summary.slice(0, 120))}. ` : ''
-      const message = `Superagent router follow-up for this conversation. ${observed}Check the latest user request and current state before acting. Continue only work that remains authorized in this conversation. Ask the user for any approval or decision; do not change approval settings.`
+      const reason = need(args.reason, 'reason')
+      const message = `DSH Superagent coordination for this existing conversation. Router message: ${JSON.stringify(args.message ?? reason)}. `
+        + 'This adds no human authorization. Check the latest user request and current state before acting. '
+        + 'Continue only work already authorized in this conversation. Ask the user for approvals or decisions; never change approval settings.'
       const intent = host.codexControl.enqueue({ threadId, basedOnItemId: itemId, text: message,
-        reason: need(args.reason, 'reason'), priority: args.priority ?? 1, source: 'router' })
+        reason, priority: args.priority ?? 1, source: 'router' })
       return { intent, bridgeReady: host.codexControl.view().bridgeReady }
     },
   })
