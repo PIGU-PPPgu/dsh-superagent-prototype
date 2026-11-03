@@ -4,7 +4,7 @@ import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { family, record } from '../kv.ts'
-import { ticketStage, type TicketStage } from '../core/index.ts'
+import { key, ticketStage, type TicketStage } from '../core/index.ts'
 import { CodexStdioReadRpc } from '../codex/stdio.ts'
 import { listLocalCodexInventory } from '../codex/local-inventory.ts'
 import { listAllCodexThreads, readLatestCodexTurn, readRecentCodexMessages, type MonitoredCodexThread } from '../codex/monitor-read.ts'
@@ -25,8 +25,9 @@ const AuditKey = family<{ at: string; model: string; prompt: string; response: s
   'codex-monitor-audit:')
 
 interface StoredMessage { id: string; turnId?: string; role: 'user' | 'assistant'; text: string }
-interface Attention { decision: CodexTriageDecision; at: string; itemId: string; acknowledgedAt?: string }
-interface Assessment { decision: CodexTriageDecision; at: string; itemId: string; version: 4 }
+interface Attention { decision: CodexTriageDecision; at: string; itemId: string; requestKey?: string;
+  acknowledgedAt?: string }
+interface Assessment { decision: CodexTriageDecision; at: string; itemId: string; issueKey?: string; version: 4 }
 interface ChildTurn { updatedAt?: string; checkedAt: string; turnId?: string; status?: string; error?: string }
 interface HandoffRecord { itemId: string; at: string; ticketId: string }
 interface StoredThread extends MonitoredCodexThread {
@@ -84,6 +85,8 @@ export interface CodexMonitorThreadView {
   present: boolean
   stage?: CodexTriageStage
   assessmentItemId?: string
+  assessmentEvidence?: string
+  assessmentKey?: string
   summary?: string
   childCount?: number
   childErrors?: number
@@ -132,6 +135,23 @@ export interface CodexRouteHead {
   archived: boolean
   needsYou: boolean
   ready: boolean
+}
+
+/** Identify the sentence containing the quoted request or failure, excluding earlier progress sentences. */
+function issueKey(kind: 'human' | 'technical', text: string | undefined, evidence: string | undefined): string {
+  const at = evidence && text ? text.lastIndexOf(evidence) : -1
+  const whole = (text ?? evidence ?? '').replace(/\s+/g, ' ').trim()
+  if (at < 0) return key(`codex-${kind}-issue`, whole)
+  const before = text!.slice(0, at)
+  const start = Math.max(...['。', '！', '？', '!', '?', '；', ';', '\n']
+    .map(separator => before.lastIndexOf(separator))) + 1
+  const rest = text!.slice(at)
+  const stop = rest.search(/[。！？!?；;\n]/)
+  const sentence = text!.slice(start, stop < 0 ? undefined : at + stop + 1).replace(/\s+/g, ' ').trim()
+  const contextDependent = sentence.replace(/[。！？!?；;\s]/g, '').length <= 6
+    || /(?:上述|以上|前述|该操作|above)/i.test(sentence)
+    || /(?:以下|如下)(?:操作|内容|步骤)?[:：。！？!?；;]?$|following[:：。!?]?$/.test(sentence)
+  return key(`codex-${kind}-issue`, contextDependent ? whole : sentence)
 }
 type ReadRpc = Pick<CodexStdioReadRpc, 'request' | 'close'>
 export interface CodexFailureCandidate {
@@ -276,6 +296,9 @@ export class CodexMonitor {
       ...(row.latestTurnId ? { latestTurnId: row.latestTurnId } : {}),
       ...(row.latestTurnStatus ? { latestTurnStatus: row.latestTurnStatus } : {}),
       ...(row.assessment?.decision.stage ? { stage: row.assessment.decision.stage } : {}),
+      ...(row.assessment?.itemId ? { assessmentItemId: row.assessment.itemId } : {}),
+      ...(row.assessment?.decision.evidence ? { assessmentEvidence: row.assessment.decision.evidence } : {}),
+      ...(row.assessment?.issueKey ? { assessmentKey: row.assessment.issueKey } : {}),
       ...(row.assessment?.decision.summary ? { summary: row.assessment.decision.summary } : {}),
       childCount: childStats[row.id]?.count ?? 0,
       childErrors: childStats[row.id]?.errors ?? 0,
@@ -525,13 +548,15 @@ export class CodexMonitor {
           const newUser = recent.messages.some(message => message.role === 'user')
           const latestAssistantId = recent.latestAssistantItemId ?? (newAssistant ? undefined : previous?.lastAssistantItemId)
           const latestContext = context.at(-1)
-          const assistantRequest = latestContext?.role === 'assistant'
-            ? userDecisionRequest([...recent.messages].reverse().find(message => message.role === 'assistant')?.text
+          const latestAssistantText = latestContext?.role === 'assistant'
+            ? ([...recent.messages].reverse().find(message => message.role === 'assistant')?.text
               ?? latestContext.text) : undefined
+          const assistantRequest = latestAssistantText ? userDecisionRequest(latestAssistantText) : undefined
           const statusChanged = recent.latestTurnStatus === 'failed'
             && (previous?.latestTurnStatus !== recent.latestTurnStatus || previous.latestTurnId !== recent.latestTurnId)
           let attention = previous?.attention
           let assessment = previous?.assessment
+          let userDecisionRequested = previous?.userDecisionRequested ?? false
           const reconcile = previous?.assessment?.version !== 4
           if (!candidate.archived && (context.at(-1)?.role === 'assistant' || statusChanged)
             && (newAssistant || statusChanged || reconcile)) {
@@ -558,15 +583,30 @@ export class CodexMonitor {
             const visible = classified.needsAttention && !fresh && !previous?.attention
               ? { ...classified, needsAttention: false, kind: 'none' as const, stage: 'unknown' as const,
                 reason: '历史请求未确认', action: '无需处理' } : classified
-            assessment = { decision: visible, at: seenAt, itemId, version: 4 }
-            attention = visible.needsAttention && (fresh || !!previous?.attention)
-              ? { decision: visible, at: seenAt, itemId } : undefined
+            assessment = { decision: visible, at: seenAt, itemId, version: 4,
+              ...((visible.stage === 'failed' || visible.stage === 'blocked')
+                ? { issueKey: issueKey('technical', latestAssistantText, visible.evidence) } : {}) }
+            const requestKey = visible.stage === 'needsYou'
+              ? issueKey('human', latestAssistantText, visible.evidence) : undefined
+            const latestAttention: Attention | undefined = visible.needsAttention && (fresh || !!previous?.attention)
+              ? { decision: visible, at: seenAt, itemId, ...(requestKey ? { requestKey } : {}) } : undefined
+            // Keep an unanswered human request visible while retaining the latest technical assessment.
+            const pending = previous?.attention?.decision.stage === 'needsYou' && !newUser
+            const sameRequest = visible.stage === 'needsYou'
+              && previous?.attention?.decision.kind === visible.kind
+              && previous.attention.requestKey === requestKey
+            attention = pending && visible.stage !== 'reportedComplete'
+              && (visible.stage !== 'needsYou' || sameRequest) ? previous.attention : latestAttention
+            userDecisionRequested = classified.stage === 'needsYou' || !!assistantRequest
+              || !newUser && classified.stage !== 'reportedComplete'
+              && (!!previous?.userDecisionRequested || previous?.attention?.decision.stage === 'needsYou')
           } else if ((newUser || reconcile) && context.at(-1)?.role === 'user') {
             const itemId = context.at(-1)?.id ?? recent.newestItemId ?? candidate.id
             assessment = { version: 4, at: seenAt, itemId, decision: { needsAttention: false,
               kind: 'none', stage: 'progress', summary: '最近记录为用户消息，等待后续进展',
               reason: '已收到用户消息', action: '无需处理' } }
             attention = undefined
+            userDecisionRequested = false
           }
           next = { ...candidate, seenAt, checkedAt: seenAt, present: true, baselined: true, context,
             ...(previous?.autoHandoffBaselineItemId !== undefined
@@ -582,7 +622,7 @@ export class CodexMonitor {
                 ? { autoHandoffFreshItemId: previous.autoHandoffFreshItemId } : {}),
             ...(recent.newestItemId ? { lastItemId: recent.newestItemId } : {}),
             ...(latestAssistantId ? { lastAssistantItemId: latestAssistantId } : {}),
-            userDecisionRequested: !!assistantRequest || !!previous?.userDecisionRequested && !newAssistant,
+            userDecisionRequested,
             ...(recent.latestTurnId ? { latestTurnId: recent.latestTurnId } : {}),
             ...(recent.latestTurnStatus ? { latestTurnStatus: recent.latestTurnStatus } : {}),
             ...(assessment ? { assessment } : {}),

@@ -37,7 +37,9 @@ function fixture() {
   let latestTurnId = 'turn-a'
   let latestTurnStatus = 'completed'
   let suppressNewAssistant = false
+  let userReply = false
   let assistantText = '请检查发布结果'
+  let oldAssistantText = '正在处理'
   let subagent = false
   let childCount = 0
   let failedChildId: string | undefined
@@ -78,11 +80,13 @@ function fixture() {
             type: 'commandExecution' } }] : []),
           ...(phase && !suppressNewAssistant ? [{ turnId: latestTurnId, item: { id: `answer-new-${phase}`, type: 'agentMessage',
             text: assistantText } }] : []),
+          ...(phase === 2 && userReply ? [{ turnId: latestTurnId, item: { id: 'reply-new-2', type: 'userMessage',
+            content: [{ type: 'text', text: '我已答复，请继续' }] } }] : []),
           ...(phase > 1 && !suppressNewAssistant ? [{ turnId: 'turn-a', item: { id: 'answer-new-1', type: 'agentMessage',
             text: '请检查发布结果' } }] : []),
           ...(longBaselineSeen ? [{ turnId: 'turn-a', item: { id: 'baseline-13', type: 'agentMessage',
             text: '旧进展' } }] : []),
-          ...missingAnchor ? [] : [{ turnId: 'turn-a', item: { id: 'answer-old', type: 'agentMessage', text: '正在处理' } },
+          ...missingAnchor ? [] : [{ turnId: 'turn-a', item: { id: 'answer-old', type: 'agentMessage', text: oldAssistantText } },
           { turnId: 'turn-a', item: { id: 'question-old', type: 'userMessage', content: [
             { type: 'text', text: '请处理发布' },
           ] } }],
@@ -112,7 +116,9 @@ function fixture() {
     advanceMinutes: (minutes: number) => { now = new Date(now.getTime() + minutes * 60_000) },
     setTurn: (id: string, status: string) => { latestTurnId = id; latestTurnStatus = status },
     setSuppressNewAssistant: (value: boolean) => { suppressNewAssistant = value },
+    setUserReply: (value: boolean) => { userReply = value },
     setAssistantText: (value: string) => { assistantText = value },
+    setOldAssistantText: (value: string) => { oldAssistantText = value },
     setSubagent: (value: boolean) => { subagent = value },
     setChildCount: (value: number) => { childCount = value },
     setFailedChild: (value: string) => { failedChildId = value },
@@ -374,6 +380,208 @@ it('summarizes existing conversations and alerts on later assistant action', asy
   expect(restarted.view().attentionTotal).toBe(0)
 })
 
+it('keeps an unanswered request through progress commentary in the same turn', async () => {
+  const { monitor, setPhase, setDecision, setAssistantText } = fixture()
+  await monitor.scanOnce()
+  setPhase(1)
+  setDecision(reviewDecision)
+  await monitor.scanOnce()
+  const pending = monitor.view().attention[0]!.attention!
+  setPhase(2)
+  setAssistantText('正在核查发布结果')
+  setDecision(progressDecision)
+  await monitor.scanOnce()
+  expect(monitor.view().attention[0]?.attention?.itemId).toBe(pending.itemId)
+  expect(monitor.view().threads[0]?.stage).toBe('progress')
+  expect(monitor.routeHead('thread-a')?.needsYou).toBe(true)
+})
+
+it('does not create a second alert when the same request is restated in one turn', async () => {
+  const { monitor, setPhase, setDecision } = fixture()
+  await monitor.scanOnce()
+  setPhase(1)
+  setDecision(reviewDecision)
+  await monitor.scanOnce()
+  const pending = monitor.view().attention[0]!.attention!
+  setPhase(2)
+  setDecision(JSON.stringify({ needsAttention: true, stage: 'needsYou', kind: 'review',
+    reason: '请审阅结果', action: '确认发布结果', summary: '发布结果待审阅', evidence: '请检查发布结果' }))
+  await monitor.scanOnce()
+  expect(monitor.view().attention[0]?.attention?.itemId).toBe(pending.itemId)
+})
+
+it('clears a pending request when the assistant reports completion', async () => {
+  const { monitor, setPhase, setDecision, setAssistantText } = fixture()
+  await monitor.scanOnce()
+  setPhase(1)
+  setDecision(reviewDecision)
+  await monitor.scanOnce()
+  setPhase(2)
+  setAssistantText('结果已完成，无需你确认。')
+  setDecision(JSON.stringify({ needsAttention: false, stage: 'reportedComplete', kind: 'none',
+    reason: '已完成', action: '无需处理', summary: '发布结果已完成' }))
+  await monitor.scanOnce()
+  expect(monitor.view().attentionTotal).toBe(0)
+  expect(monitor.routeHead('thread-a')?.needsYou).toBe(false)
+})
+
+it('clears an unanswered request when a new user answer arrives', async () => {
+  const { monitor, setPhase, setDecision, setAssistantText, setUserReply, setTurn } = fixture()
+  await monitor.scanOnce()
+  setPhase(1)
+  setDecision(reviewDecision)
+  await monitor.scanOnce()
+  expect(monitor.view().attentionTotal).toBe(1)
+  setPhase(2)
+  setTurn('turn-b', 'completed')
+  setUserReply(true)
+  setAssistantText('已收到答复，继续处理')
+  setDecision(progressDecision)
+  await monitor.scanOnce()
+  expect(monitor.view().attentionTotal).toBe(0)
+  expect(monitor.view().threads[0]?.stage).toBe('progress')
+})
+
+it('keeps approval pending while reporting a later technical failure', async () => {
+  for (const acknowledged of [false, true]) {
+    const { monitor, autoHandoff, setPhase, setDecision, setAssistantText } = fixture()
+    await monitor.scanOnce()
+    monitor.setAutoHandoff(true)
+    setPhase(1)
+    setAssistantText('请批准安装工具 A')
+    setDecision(JSON.stringify({ needsAttention: true, stage: 'needsYou', kind: 'approval',
+      reason: '工具 A 待批准', action: '批准工具 A', summary: '等待批准工具 A', evidence: '请批准' }))
+    await monitor.scanOnce()
+    const approval = monitor.view().attention[0]!.attention!
+    if (acknowledged) monitor.acknowledge('thread-a', approval.itemId, approval.at)
+    setPhase(2)
+    setAssistantText('构建失败：找不到编译器')
+    setDecision(JSON.stringify({ needsAttention: true, stage: 'failed', kind: 'failure',
+      reason: '编译器缺失', action: '检查构建环境', summary: '构建失败', evidence: '找不到编译器' }))
+    await monitor.scanOnce()
+    expect(monitor.view().threads[0]).toMatchObject({ stage: 'failed', assessmentEvidence: '找不到编译器' })
+    expect(monitor.routeHead('thread-a')?.needsYou).toBe(true)
+    expect(monitor.view().attentionTotal).toBe(acknowledged ? 0 : 1)
+    expect(autoHandoff).not.toHaveBeenCalled()
+  }
+})
+
+it('does not let confirmation of one approval hide a different approval with the same short quote', async () => {
+  const { monitor, stream, setPhase, setDecision, setAssistantText, holdModel } = fixture()
+  await monitor.scanOnce()
+  setPhase(1)
+  setAssistantText(`请批准执行以下操作：${'说明'.repeat(150)}安装工具 A`)
+  setDecision(JSON.stringify({ needsAttention: true, stage: 'needsYou', kind: 'approval',
+    reason: '工具 A 待批准', action: '批准工具 A', summary: '等待批准工具 A', evidence: '请批准' }))
+  await monitor.scanOnce()
+  const first = monitor.view().attention[0]!.attention!
+  setPhase(2)
+  setAssistantText(`请批准执行以下操作：${'说明'.repeat(150)}安装工具 B`)
+  setDecision(JSON.stringify({ needsAttention: true, stage: 'needsYou', kind: 'approval',
+    reason: '工具 B 待批准', action: '批准工具 B', summary: '等待批准工具 B', evidence: '请批准' }))
+  const release = holdModel()
+  const scanning = monitor.scanOnce()
+  await vi.waitFor(() => expect(stream).toHaveBeenCalledTimes(3))
+  monitor.acknowledge('thread-a', first.itemId, first.at)
+  release()
+  await scanning
+  const second = monitor.view().attention[0]!.attention!
+  expect(second.itemId).not.toBe(first.itemId)
+  expect(second.requestKey).not.toBe(first.requestKey)
+  expect(monitor.view().attentionTotal).toBe(1)
+  monitor.acknowledge('thread-a', first.itemId, first.at)
+  expect(monitor.view().attentionTotal).toBe(1)
+})
+
+it('does not reopen the same approval when only earlier progress changes', async () => {
+  for (const evidence of ['请批准', '请批准安装工具 A。']) for (const acknowledged of [false, true]) {
+    const { monitor, setPhase, setDecision, setAssistantText } = fixture()
+    await monitor.scanOnce()
+    setPhase(1)
+    setAssistantText('已检查 1 个文件。请批准安装工具 A。')
+    setDecision(JSON.stringify({ needsAttention: true, stage: 'needsYou', kind: 'approval',
+      reason: '工具待批准', action: '批准工具 A', summary: '等待批准', evidence }))
+    await monitor.scanOnce()
+    const first = monitor.view().attention[0]!.attention!
+    if (acknowledged) monitor.acknowledge('thread-a', first.itemId, first.at)
+    setPhase(2)
+    setAssistantText('已检查 2 个文件。请批准安装工具 A。')
+    await monitor.scanOnce()
+    const current = monitor.view().threads[0]!.attention!
+    expect(current.itemId).toBe(first.itemId)
+    expect(current.requestKey).toBe(first.requestKey)
+    expect(monitor.view().attentionTotal).toBe(acknowledged ? 0 : 1)
+  }
+})
+
+it('distinguishes approvals whose operation appears before the evidence quote', async () => {
+  const { monitor, stream, setPhase, setDecision, setAssistantText, holdModel } = fixture()
+  await monitor.scanOnce()
+  setPhase(1)
+  setAssistantText('安装工具 A，请批准后我会继续执行剩余任务。')
+  setDecision(JSON.stringify({ needsAttention: true, stage: 'needsYou', kind: 'approval',
+    reason: '工具 A 待批准', action: '批准工具 A', summary: '等待批准工具 A', evidence: '请批准' }))
+  await monitor.scanOnce()
+  const first = monitor.view().attention[0]!.attention!
+  setPhase(2)
+  setAssistantText('安装工具 B，请批准后我会继续执行剩余任务。')
+  setDecision(JSON.stringify({ needsAttention: true, stage: 'needsYou', kind: 'approval',
+    reason: '工具 B 待批准', action: '批准工具 B', summary: '等待批准工具 B', evidence: '请批准' }))
+  const release = holdModel()
+  const scanning = monitor.scanOnce()
+  await vi.waitFor(() => expect(stream).toHaveBeenCalledTimes(3))
+  monitor.acknowledge('thread-a', first.itemId, first.at)
+  release()
+  await scanning
+  expect(monitor.view().attentionTotal).toBe(1)
+  expect(monitor.view().attention[0]?.attention?.itemId).not.toBe(first.itemId)
+  expect(monitor.view().attention[0]?.attention?.requestKey).not.toBe(first.requestKey)
+})
+
+it('keeps a historical baseline approval as an auto-handoff blocker', async () => {
+  const { monitor, autoHandoff, setOldAssistantText, setAssistantText,
+    setDecision, setPhase, advanceMinutes } = fixture()
+  setOldAssistantText('请批准安装工具 A')
+  setDecision(JSON.stringify({ needsAttention: true, stage: 'needsYou', kind: 'approval',
+    reason: '工具 A 待批准', action: '批准工具 A', summary: '等待批准工具 A', evidence: '请批准' }))
+  monitor.setEnabled(true)
+  await monitor.scanOnce()
+  expect(monitor.view().attentionTotal).toBe(0)
+  expect(monitor.routeHead('thread-a')?.needsYou).toBe(true)
+  monitor.setAutoHandoff(true)
+  advanceMinutes(1)
+  setPhase(1)
+  setAssistantText('构建失败：编译器缺失')
+  setDecision(JSON.stringify({ needsAttention: true, stage: 'failed', kind: 'failure',
+    reason: '编译器缺失', action: '检查环境', summary: '构建失败', evidence: '编译器缺失' }))
+  await monitor.scanOnce()
+  expect(monitor.view().threads[0]?.stage).toBe('failed')
+  expect(monitor.routeHead('thread-a')?.needsYou).toBe(true)
+  expect(autoHandoff).not.toHaveBeenCalled()
+})
+
+it('distinguishes technical failures with the same short evidence quote', async () => {
+  for (const [firstText, secondText] of [
+    ['构建失败：编译器缺失', '构建失败：磁盘空间耗尽'],
+    ['编译器缺失导致构建失败，接下来会继续检查环境。', '磁盘空间耗尽导致构建失败，接下来会继续检查环境。'],
+  ]) {
+    const { monitor, setPhase, setDecision, setAssistantText } = fixture()
+    await monitor.scanOnce()
+    setPhase(1)
+    setAssistantText(firstText!)
+    setDecision(JSON.stringify({ needsAttention: true, stage: 'failed', kind: 'failure',
+      reason: '编译器缺失', action: '检查编译器', summary: '构建失败：编译器缺失', evidence: '构建失败' }))
+    await monitor.scanOnce()
+    const first = monitor.view().threads[0]!.assessmentKey
+    setPhase(2)
+    setAssistantText(secondText!)
+    setDecision(JSON.stringify({ needsAttention: true, stage: 'failed', kind: 'failure',
+      reason: '磁盘空间耗尽', action: '清理磁盘', summary: '构建失败：磁盘空间耗尽', evidence: '构建失败' }))
+    await monitor.scanOnce()
+    expect(monitor.view().threads[0]?.assessmentKey).not.toBe(first)
+  }
+})
+
 it('uses a complete, validated decision when the model reaches its token limit', async () => {
   const { monitor, setFinishKind } = fixture()
   setFinishKind('max-tokens')
@@ -468,15 +676,20 @@ it('keeps an acknowledgement made while the model is finishing a later routine u
   await scanning
   expect(monitor.view().attentionTotal).toBe(0)
   expect(monitor.view().threads[0]?.stage).toBe('progress')
+  expect(monitor.routeHead('thread-a')?.needsYou).toBe(true)
 })
 
 it('does not dismiss a newer alert using the version of an older visible alert', async () => {
-  const { monitor, setPhase } = fixture()
+  const { monitor, setPhase, setAssistantText, setDecision } = fixture()
   await monitor.scanOnce()
   setPhase(1)
   await monitor.scanOnce()
   const old = monitor.view().attention[0]!.attention!
   setPhase(2)
+  setAssistantText('请审阅第二次发布结果')
+  setDecision(JSON.stringify({ needsAttention: true, stage: 'needsYou', kind: 'review',
+    reason: '第二次结果待审阅', action: '检查第二次发布结果', summary: '第二次发布结果已提交审阅',
+    evidence: '请审阅第二次发布结果' }))
   await monitor.scanOnce()
   const current = monitor.view().attention[0]!.attention!
   expect(current.itemId).not.toBe(old.itemId)

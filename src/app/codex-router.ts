@@ -27,6 +27,7 @@ interface StoredBrief { fingerprint: string; value: CodexRouterBrief }
 const BriefKey = record<StoredBrief>('codex-router-brief-v1')
 
 const compact = (text: string | undefined, limit = 140): string => (text ?? '').replace(/\s+/g, ' ').trim().slice(0, limit)
+const sortedFacts = (rows: unknown[][]): string[] => rows.map(row => JSON.stringify(row)).sort()
 const item = (row: CodexMonitorThreadView, kind: CodexRouterPriority['kind']): CodexRouterPriority => ({
   threadId: row.id, title: compact(row.title, 100), summary: compact(
     kind === 'needsYou' || kind === 'technical' ? row.attention?.decision.action ?? row.attention?.decision.reason
@@ -48,9 +49,7 @@ export class CodexRouter {
   refresh(): CodexRouterBrief {
     const monitor = this.deps.monitor.view(0, 1000, 'recent')
     const human = monitor.attention.filter(row => row.attention?.decision.stage === 'needsYou')
-    const technicalFacts = monitor.threads.filter(row => row.stage === 'failed' || row.stage === 'blocked')
-    const technical = monitor.attention.filter(row => row.attention?.decision.stage === 'failed'
-      || row.attention?.decision.stage === 'blocked')
+    const technical = monitor.threads.filter(row => row.stage === 'failed' || row.stage === 'blocked')
     const priorities = [
       ...human.map(row => item(row, 'needsYou')),
       ...monitor.managed.filter(row => row.handoffStage?.stage === 'person').map(row => item(row, 'ticketNeedsYou')),
@@ -67,13 +66,15 @@ export class CodexRouter {
       needsYou: human.length, technical: technical.length,
       managed: monitor.managedTotal, priorities, recent }
     const fingerprint = key('codex-router-brief', JSON.stringify({
-      attention: human.map(row => [row.id, row.attention?.itemId]),
-      technical: technicalFacts.map(row => [row.id, row.assessmentItemId, row.stage]),
-      managed: monitor.managed.filter(row => row.handoffStage?.stage === 'person')
+      attention: sortedFacts(human.map(row => [row.id, row.latestTurnId, row.attention?.decision.kind,
+        row.attention?.requestKey ?? [row.attention?.decision.evidence, row.attention?.decision.action]])),
+      technical: sortedFacts(technical.map(row => [row.id, row.latestTurnId,
+        row.stage, row.assessmentKey ?? [row.assessmentEvidence, row.summary]])),
+      managed: sortedFacts(monitor.managed.filter(row => row.handoffStage?.stage === 'person')
         .map(row => [row.handoffTicketId, row.handoffStage?.stage,
-        row.handoffStage && 'action' in row.handoffStage ? row.handoffStage.action : undefined]),
-      childFailure: monitor.threads.filter(row => (row.childErrors ?? 0) > 0 && row.stage !== 'reportedComplete')
-        .map(row => [row.id, row.childErrors]),
+          row.handoffStage && 'action' in row.handoffStage ? row.handoffStage.action : undefined])),
+      childFailure: sortedFacts(monitor.threads.filter(row => (row.childErrors ?? 0) > 0
+        && row.stage !== 'reportedComplete').map(row => [row.id, row.childErrors])),
     }))
     const previous = this.deps.store.get(BriefKey)
     this.deps.store.atomic(() => {
