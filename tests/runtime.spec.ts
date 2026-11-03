@@ -296,11 +296,6 @@ it('lets the DSH Router queue a stale-guarded Codex follow-up without answering 
     base_item_id: 'item-head', reason: 'Continue the build', priority: 2 })
   expect(queued.intent).toMatchObject({ status: 'queued', priority: 2, threadId: 'thread-router' })
   expect(runtime.codexControl.view().intents).toHaveLength(1)
-  const internal = runtime as unknown as { routeCodexFailure(candidate: { threadId: string; itemId: string; title: string;
-    summary: string; evidence: string; messages: { role: 'assistant'; text: string }[] }, signal: AbortSignal): Promise<string | undefined> }
-  expect(await internal.routeCodexFailure({ threadId: 'thread-router', itemId: 'item-head', title: 'Build task',
-    summary: 'Build failed', evidence: 'Build failed', messages: [{ role: 'assistant', text: 'Build failed' }] },
-  new AbortController().signal)).toBe((queued.intent as { id: string }).id)
   expect(runtime.store.tickets.list()).toEqual([])
   runtime.store.set('codex-monitor-v1', { ...state, threads: { 'thread-router': { ...state.threads['thread-router'],
     userDecisionRequested: true,
@@ -317,7 +312,6 @@ it('keeps a Codex conversation with an active DSH Ticket out of the native route
     messages: [{ role: 'assistant' as const, text: 'Build failed' }] }
   const internal = runtime as unknown as {
     acceptCodexFailure(value: typeof candidate, signal: AbortSignal): Promise<string>
-    routeCodexFailure(value: typeof candidate, signal: AbortSignal): Promise<string | undefined>
   }
   const ticketId = await internal.acceptCodexFailure(candidate, new AbortController().signal)
   expect(runtime.store.tickets.get(ticketId)?.ended).toBeUndefined()
@@ -326,8 +320,37 @@ it('keeps a Codex conversation with an active DSH Ticket out of the native route
       present: true, baselined: true, lastItemId: candidate.itemId, seenAt: '2026-11-03T05:00:00Z', context: [] },
   } })
   runtime.codexControl.setEnabled(true)
-  expect(await internal.routeCodexFailure(candidate, new AbortController().signal)).toBeUndefined()
+  await expect(runTool(runtime.masterId, 'orchestrator_codex_route', { operation: 'followup',
+    thread_id: candidate.threadId, base_item_id: candidate.itemId, reason: 'Continue the build' }))
+    .rejects.toThrow('active DSH Ticket')
   expect(runtime.codexControl.view().intents).toEqual([])
+})
+
+it('does not create a DSH Ticket alongside a pending native Codex follow-up', async () => {
+  const candidate = { threadId: 'thread-pending', itemId: 'assistant-new', title: 'Build failed',
+    summary: 'Build failed', evidence: 'Build failed', repository: 'acme/widgets',
+    messages: [{ role: 'assistant' as const, text: 'Build failed' }] }
+  const internal = runtime as unknown as {
+    acceptCodexFailure(value: typeof candidate, signal: AbortSignal): Promise<string>
+  }
+  runtime.codexControl.setEnabled(true)
+  const queued = runtime.codexControl.enqueue({ threadId: candidate.threadId, basedOnItemId: 'assistant-old',
+    text: 'Continue the task', reason: 'Router follow-up', source: 'router' })
+  const ticketId = await internal.acceptCodexFailure(candidate, new AbortController().signal)
+  expect(runtime.store.tickets.get(ticketId)?.ended).toBeUndefined()
+  expect(runtime.codexControl.view().intents.find(intent => intent.id === queued.id)?.status).toBe('cancelled')
+  const queue = JSON.parse(readFileSync(join(runtime.codexControl.directory, 'queue.json'), 'utf8')) as { actions: unknown[] }
+  expect(queue.actions).toEqual([])
+
+  const blocked = { ...candidate, threadId: 'thread-dispatching', itemId: 'assistant-blocked' }
+  const claimed = runtime.codexControl.enqueue({ threadId: blocked.threadId, basedOnItemId: 'assistant-old',
+    text: 'Continue the task', reason: 'Router follow-up', source: 'router' })
+  writeFileSync(join(runtime.codexControl.directory, 'receipts', `${claimed.id}.json`), JSON.stringify({ version: 1,
+    intentId: claimed.id, threadId: blocked.threadId, status: 'dispatching', at: new Date().toISOString() }), { mode: 0o600 })
+  await expect(internal.acceptCodexFailure(blocked, new AbortController().signal)).rejects.toThrow('dispatching')
+  expect(runtime.store.tickets.list().filter(ticket => runtime.store.triggers.get(ticket.origin.triggerId)
+    ?.meta.threadId === blocked.threadId)).toEqual([])
+  expect(runtime.codexControl.view().intents.find(intent => intent.id === claimed.id)?.status).toBe('dispatching')
 })
 
 it('fans a person\'s later thread message out to the live worker as context and tells the orchestrator, without an Eval', async () => {

@@ -174,7 +174,6 @@ export interface CodexMonitorDeps {
   pollMs?: number
   now?: () => Date
   autoHandoff?: (candidate: CodexFailureCandidate, signal: AbortSignal) => Promise<string>
-  autoRoute?: (candidate: CodexFailureCandidate, signal: AbortSignal) => Promise<string | undefined>
   onScan?: () => void
 }
 
@@ -680,12 +679,6 @@ export class CodexMonitor {
           ...(row.context.at(-1)?.turnId ? { turnId: row.context.at(-1)?.turnId } : {}),
           ...(row.repository ? { repository: row.repository } : {}),
           messages: row.context.map(({ role, text }) => ({ role, text })) } satisfies CodexFailureCandidate
-        const intentId = await this.deps.autoRoute?.(candidate, signal)
-        if (intentId) {
-          const current = this.state().threads[threadId] ?? row
-          this.commitThread(threadId, { ...current, autoHandoff: { itemId: assessment.itemId, at, intentId } })
-          continue
-        }
         const ticketId = await handler(candidate, signal)
         const current = this.state().threads[threadId] ?? row
         const history = current.handoffs ?? (current.autoHandoff?.ticketId ? [current.autoHandoff as HandoffRecord] : [])

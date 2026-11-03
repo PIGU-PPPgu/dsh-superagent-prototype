@@ -92,6 +92,30 @@ export class CodexControl {
       return this.view()
     })
   }
+  /** Give a DSH Ticket exclusive ownership before it is created, sharing the bridge's claim lock. */
+  forTicket<T>(threadId: string, create: () => T): T {
+    CodexIdSchema.parse(threadId)
+    return this.locked(() => {
+      this.syncUnlocked()
+      const result = this.deps.store.atomic(() => {
+        const state = this.state()
+        const pending = Object.values(state.intents).filter(intent => intent.threadId === threadId && active(intent.status))
+        if (pending.some(intent => intent.status === 'dispatching')) {
+          throw new Error('Codex native follow-up is dispatching; DSH Ticket will retry later')
+        }
+        if (pending.length) {
+          const at = this.now()
+          this.save({ ...state, intents: Object.fromEntries(Object.entries(state.intents).map(([id, intent]) =>
+            [id, intent.threadId === threadId && intent.status === 'queued'
+              ? { ...intent, status: 'cancelled' as const, updatedAt: at,
+                error: 'A DSH Ticket owns this conversation' } : intent])) })
+        }
+        return create()
+      })
+      this.writeQueue()
+      return result
+    })
+  }
   enqueue(input: { threadId: string; basedOnItemId: string; text: string; reason: string; priority?: number;
     source: 'router' | 'panel' }): CodexControlIntent {
     const threadId = CodexIdSchema.parse(input.threadId)

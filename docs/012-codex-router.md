@@ -10,7 +10,10 @@
 
 DSH 主 Session 用 `orchestrator_codex_route` 的 `operation=head` 读取目标主会话，`operation=followup` 排一条后续任务，`reorder` 或 `cancel` 只影响尚未领取的任务。工具要求仍在监控中的未归档主会话、与路由读取一致的最新 item ID、无待用户决定事项、无正在执行的同会话 DSH Ticket。发送文案由宿主根据同一会话摘要生成，并要求目标 Session 重新核对当前任务、把审批交给用户。
 
-自动接单仍遵守 011 的原文证据、历史基线和审批限制。会话控制开启且原生桥心跳新鲜时，符合条件的新失败或技术阻塞优先排给原 Codex 主会话；桥断线或控制关闭时继续使用独立 DSH Ticket。子线程不独立接收控制消息，由主会话处理。
+自动接单仍遵守 011 的原文证据、历史基线和审批限制。符合条件的新失败或技术阻塞进入独立 DSH Ticket；原生桥心跳不参与自动接单或工单所有权判定。主 Session 显式排入的后续消息只是一条待发送意图，送达也不等于 DSH 已接单或完成工作。子线程不独立接收控制消息，由主会话处理。
+若同一会话已有未领取的后续意图，创建 Ticket 时一并取消它；意图已经被领取而发送结果未明时，暂缓创建 Ticket，避免两边同时执行。
+
+目前 Codex 自动接单仍由监控器直接调用 DSH Engine 创建 Ticket，没有经过普通 Source 的 Trigger/Eval 和主 Session 决策链。要让 DSH 主 Session 真正承担这部分路由，应将 Codex 历史观察接为 Source，再由 Policy 和 Eval 决定是否创建 Ticket；现有自动接单不能当作这项改造已经完成的证据。
 
 ## 原生桥
 
