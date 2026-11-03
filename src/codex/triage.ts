@@ -172,11 +172,16 @@ export function parseCodexTriageDecision(
   if (typeof record.kind !== 'string' || !kinds.includes(record.kind as CodexTriageKind)) {
     throw new Error('kind is invalid')
   }
-  for (const field of ['reason', 'action'] as const) {
-    if (typeof record[field] !== 'string' || record[field].length === 0 || record[field].length > MAX_CODEX_TRIAGE_TEXT_CHARS) {
-      throw new Error(`${field} is invalid`)
-    }
+  const bounded = (value: unknown, field: string, max: number): string => {
+    if (typeof value !== 'string' || !value.trim()) throw new Error(`${field} is invalid`)
+    return value.trim().slice(0, max)
   }
+  const routine = record.needsAttention === false && record.kind === 'none'
+  const reason = routine && typeof record.reason === 'string' && !record.reason.trim()
+    ? record.stage === 'reportedComplete' ? '报告完成' : '最近记录无需处理'
+    : bounded(record.reason, 'reason', MAX_CODEX_TRIAGE_TEXT_CHARS)
+  const action = routine && typeof record.action === 'string' && !record.action.trim() ? '无需处理'
+    : bounded(record.action, 'action', MAX_CODEX_TRIAGE_TEXT_CHARS)
 
   let stage: CodexTriageStage | undefined
   let summary: string | undefined
@@ -191,18 +196,12 @@ export function parseCodexTriageDecision(
     }
   }
   if ('summary' in record) {
-    if (typeof record.summary !== 'string' || record.summary.length === 0
-      || record.summary.length > MAX_CODEX_TRIAGE_SUMMARY_CHARS) {
-      throw new Error('summary is invalid')
-    }
-    summary = record.summary as string
+    summary = bounded(record.summary, 'summary', MAX_CODEX_TRIAGE_SUMMARY_CHARS)
   }
   if ('evidence' in record && record.evidence !== undefined && record.evidence !== '') {
-    if (typeof record.evidence !== 'string' || record.evidence.length === 0
-      || record.evidence.length > MAX_CODEX_TRIAGE_TEXT_CHARS) {
-      throw new Error('evidence is invalid')
-    }
-    evidence = record.evidence as string
+    if (typeof record.evidence !== 'string' || !record.evidence.trim()
+      || record.evidence.length > MAX_CODEX_TRIAGE_TEXT_CHARS) throw new Error('evidence is invalid')
+    evidence = record.evidence.trim()
   }
 
   const kind = record.kind as CodexTriageKind
@@ -232,8 +231,8 @@ export function parseCodexTriageDecision(
   return {
     needsAttention: record.needsAttention,
     kind,
-    reason: record.reason as string,
-    action: record.action as string,
+    reason,
+    action,
     ...(stage === undefined ? {} : { stage }),
     ...(summary === undefined ? {} : { summary }),
     ...(evidence === undefined ? {} : { evidence }),

@@ -187,7 +187,6 @@ it('rejects malformed modern output without fabricating attention', () => {
   }
   const invalidOutputs = [
     JSON.stringify({ ...valid, stage: 'running' }),
-    JSON.stringify({ ...valid, summary: 'x'.repeat(MAX_CODEX_TRIAGE_SUMMARY_CHARS + 1) }),
     JSON.stringify({ ...valid, needsAttention: true }),
     JSON.stringify({ ...valid, kind: 'approval' }),
     JSON.stringify({ ...valid, stage: 'needsYou', kind: 'approval', needsAttention: true }),
@@ -195,6 +194,27 @@ it('rejects malformed modern output without fabricating attention', () => {
   for (const output of invalidOutputs) {
     expect(() => parseCodexTriageDecision(output, input)).toThrow()
   }
+})
+
+it('bounds verbose model prose while retaining a valid classification and original evidence', () => {
+  const decision = parseCodexTriageDecision(JSON.stringify({ needsAttention: true, stage: 'needsYou', kind: 'approval',
+    reason: '等待批准'.repeat(30), action: '请批准部署'.repeat(30), summary: '请审阅部署计划'.repeat(30),
+    evidence: '需要批准部署' }), input)
+  expect(decision.reason.length).toBe(MAX_CODEX_TRIAGE_TEXT_CHARS)
+  expect(decision.action.length).toBe(MAX_CODEX_TRIAGE_TEXT_CHARS)
+  expect(decision.summary?.length).toBe(MAX_CODEX_TRIAGE_SUMMARY_CHARS)
+  expect(decision.evidence).toBe('需要批准部署')
+})
+
+it('fills omitted prose for routine progress without inventing a human action', () => {
+  const decision = parseCodexTriageDecision(JSON.stringify({ needsAttention: false, stage: 'reportedComplete', kind: 'none',
+    reason: '', action: '', summary: '任务已完成' }))
+  expect(decision).toMatchObject({ needsAttention: false, stage: 'reportedComplete', kind: 'none',
+    reason: '报告完成', action: '无需处理' })
+  expect(parseCodexTriageDecision(JSON.stringify({ needsAttention: false, stage: 'progress', kind: 'none',
+    reason: ' ', action: ' ', summary: '正在处理' })).action).toBe('无需处理')
+  expect(() => parseCodexTriageDecision(JSON.stringify({ needsAttention: true, stage: 'failed', kind: 'failure',
+    reason: '', action: '检查失败', summary: '失败', evidence: '失败' }))).toThrow('reason is invalid')
 })
 
 it('does not let malicious model output bypass evidence validation', () => {
@@ -214,6 +234,14 @@ it('does not let malicious model output bypass evidence validation', () => {
       { role: 'assistant', text: '我会先完成实现。' },
     ],
   })).toThrow('evidence is not from the latest assistant message')
+})
+
+it('rejects a long evidence quote with a real prefix and invented ending', () => {
+  const real = '构建失败，依赖版本需要修复。'.repeat(6)
+  const claimed = real.slice(0, MAX_CODEX_TRIAGE_TEXT_CHARS) + '已经取得部署批准'
+  expect(() => parseCodexTriageDecision(JSON.stringify({ needsAttention: true, stage: 'failed', kind: 'failure',
+    reason: '构建失败', action: '修复依赖', summary: '依赖构建失败', evidence: claimed }),
+  { ...input, messages: [{ role: 'assistant', text: real }] })).toThrow('evidence is invalid')
 })
 
 it('keeps long context bounded while retaining the newest assistant request', () => {
@@ -239,8 +267,6 @@ describe('rejects malformed model output without fabricating attention', () => {
     JSON.stringify({ ...valid, extra: 1 }),
     JSON.stringify({ ...valid, needsAttention: 'false' }),
     JSON.stringify({ ...valid, kind: 'urgent' }),
-    JSON.stringify({ ...valid, reason: '' }),
-    JSON.stringify({ ...valid, action: 'x'.repeat(MAX_CODEX_TRIAGE_TEXT_CHARS + 1) }),
     JSON.stringify({ ...valid, needsAttention: true }),
   ]
   for (const output of invalidOutputs) {
