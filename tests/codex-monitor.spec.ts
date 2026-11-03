@@ -5,6 +5,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { afterEach, expect, it, vi } from 'vitest'
 import { CodexMonitor, type CodexFailureCandidate, type CodexMonitorDeps } from '../src/app/codex-monitor.ts'
 import { Store } from '../src/app/store.ts'
+import type { Ticket } from '../src/core/index.ts'
 import type { MonitoredCodexThread } from '../src/codex/monitor-read.ts'
 import { listLocalCodexInventory } from '../src/codex/local-inventory.ts'
 
@@ -36,8 +37,13 @@ function fixture() {
   let latestTurnId = 'turn-a'
   let latestTurnStatus = 'completed'
   let suppressNewAssistant = false
+  let assistantText = '请检查发布结果'
   let subagent = false
   let childCount = 0
+  let failedChildId: string | undefined
+  let failedChildReadId: string | undefined
+  let childUpdatesWithPhase = false
+  let toolAfterAssistant = false
   let includeRpcRoot = true
   let updatedAtOverride: number | undefined
   let localRows: MonitoredCodexThread[] = []
@@ -53,17 +59,23 @@ function fixture() {
         updatedAt: updatedAtOverride ?? 1793530000 + (freezeUpdatedAt ? 0 : phase * 30),
       }] : []), ...Array.from({ length: childCount }, (_, index) => ({
         id: 'child-' + index, source: { subAgent: { thread_spawn: { parent_thread_id: 'thread-a' } } },
-        updatedAt: 1793530000,
+        updatedAt: 1793530000 + (childUpdatesWithPhase && index < 60 ? phase * 30 : 0),
       }))], nextCursor: null }
-      if (method === 'thread/turns/list') return { data: [{ id: latestTurnId, status: latestTurnStatus }] }
+      if (method === 'thread/turns/list') {
+        if (params.threadId === failedChildReadId) throw new Error('child read failed')
+        return { data: [{ id: latestTurnId,
+          status: params.threadId === failedChildId ? 'failed' : latestTurnStatus }] }
+      }
       if (method === 'thread/items/list') {
         if (failRead) throw new Error('read failed')
         if (longHistory) { longBaselineSeen = true; return { data: Array.from({ length: 13 }, (_, index) => ({
           turnId: 'turn-a', item: { id: `baseline-${13 - index}`, type: 'agentMessage', text: '旧进展' },
         })), nextCursor: null } }
         return { data: [
+          ...(phase && toolAfterAssistant ? [{ turnId: latestTurnId, item: { id: `tool-new-${phase}`,
+            type: 'commandExecution' } }] : []),
           ...(phase && !suppressNewAssistant ? [{ turnId: latestTurnId, item: { id: `answer-new-${phase}`, type: 'agentMessage',
-            text: '请检查发布结果' } }] : []),
+            text: assistantText } }] : []),
           ...(phase > 1 && !suppressNewAssistant ? [{ turnId: 'turn-a', item: { id: 'answer-new-1', type: 'agentMessage',
             text: '请检查发布结果' } }] : []),
           ...(longBaselineSeen ? [{ turnId: 'turn-a', item: { id: 'baseline-13', type: 'agentMessage',
@@ -97,8 +109,13 @@ function fixture() {
     advanceMinutes: (minutes: number) => { now = new Date(now.getTime() + minutes * 60_000) },
     setTurn: (id: string, status: string) => { latestTurnId = id; latestTurnStatus = status },
     setSuppressNewAssistant: (value: boolean) => { suppressNewAssistant = value },
+    setAssistantText: (value: string) => { assistantText = value },
     setSubagent: (value: boolean) => { subagent = value },
     setChildCount: (value: number) => { childCount = value },
+    setFailedChild: (value: string) => { failedChildId = value },
+    setFailedChildRead: (value: string | undefined) => { failedChildReadId = value },
+    setChildUpdatesWithPhase: (value: boolean) => { childUpdatesWithPhase = value },
+    setToolAfterAssistant: (value: boolean) => { toolAfterAssistant = value },
     setIncludeRpcRoot: (value: boolean) => { includeRpcRoot = value },
     setUpdatedAt: (value: string) => { updatedAtOverride = Date.parse(value) / 1000 },
     setLocalRows: (rows: MonitoredCodexThread[]) => { localRows = rows },
@@ -130,6 +147,125 @@ it('automatically hands off only a new assistant-evidenced failure, once per ite
   expect(autoHandoff).toHaveBeenCalledTimes(1)
 })
 
+it('keeps the assistant item as the handoff evidence when a tool item follows it', async () => {
+  const { monitor, autoHandoff, setDecision, setPhase, setToolAfterAssistant, advanceMinutes } = fixture()
+  monitor.setEnabled(true)
+  await monitor.scanOnce()
+  monitor.setAutoHandoff(true)
+  advanceMinutes(1)
+  setDecision(JSON.stringify({ needsAttention: true, stage: 'failed', kind: 'failure',
+    reason: '构建失败', action: '检查构建', summary: '构建失败', evidence: '请检查发布结果' }))
+  setPhase(1)
+  setToolAfterAssistant(true)
+  await monitor.scanOnce()
+  expect(autoHandoff).toHaveBeenCalledTimes(1)
+  expect(autoHandoff.mock.calls[0]?.[0]).toMatchObject({ itemId: 'answer-new-1' })
+})
+
+it('hands an assistant-evidenced technical blocker to DSH without treating approval as a blocker', async () => {
+  const { monitor, autoHandoff, setDecision, setPhase, advanceMinutes } = fixture()
+  monitor.setEnabled(true)
+  await monitor.scanOnce()
+  monitor.setAutoHandoff(true)
+  advanceMinutes(1)
+  setDecision(JSON.stringify({ needsAttention: true, stage: 'blocked', kind: 'blocked',
+    reason: '构建工具报错', action: '修复构建工具', summary: '构建被工具错误阻塞', evidence: '请检查发布结果' }))
+  setPhase(1)
+  await monitor.scanOnce()
+  expect(autoHandoff.mock.calls[0]?.[0]).toMatchObject({ stage: 'blocked', itemId: 'answer-new-1' })
+  expect(monitor.view().attentionTotal).toBe(0)
+  expect(monitor.view().managedTotal).toBe(1)
+})
+
+it('never dispatches a mixed failure or blocker that asks for human approval', async () => {
+  for (const [stage, kind] of [['failed', 'failure'], ['blocked', 'blocked']] as const) {
+    const { monitor, autoHandoff, setDecision, setPhase, setAssistantText, advanceMinutes } = fixture()
+    monitor.setEnabled(true)
+    await monitor.scanOnce()
+    monitor.setAutoHandoff(true)
+    advanceMinutes(1)
+    setAssistantText('构建失败，需要你批准安装工具后继续。')
+    setDecision(JSON.stringify({ needsAttention: true, stage, kind,
+      reason: '构建失败', action: '修复构建', summary: '构建受阻', evidence: '构建失败' }))
+    setPhase(1)
+    await monitor.scanOnce()
+    expect(autoHandoff).not.toHaveBeenCalled()
+    expect(monitor.view().attentionTotal).toBe(1)
+    expect(monitor.view().attention[0]?.attention?.decision).toMatchObject({ stage: 'needsYou', kind: 'approval' })
+  }
+})
+
+it('finds a direct approval request beyond the stored message preview and keeps it for the person', async () => {
+  const { monitor, autoHandoff, setDecision, setPhase, setAssistantText, advanceMinutes } = fixture()
+  monitor.setEnabled(true)
+  await monitor.scanOnce()
+  monitor.setAutoHandoff(true)
+  advanceMinutes(1)
+  setAssistantText(`构建失败。${'x'.repeat(2_100)} Can you approve installing the missing tool?`)
+  setDecision(JSON.stringify({ needsAttention: true, stage: 'failed', kind: 'failure',
+    reason: '构建失败', action: '修复构建', summary: '构建失败', evidence: '构建失败' }))
+  setPhase(1)
+  await monitor.scanOnce()
+  expect(autoHandoff).not.toHaveBeenCalled()
+  expect(monitor.view().attention[0]?.attention?.decision).toMatchObject({ stage: 'needsYou', kind: 'approval' })
+})
+
+it('still alerts on a direct approval request when model output is unavailable', async () => {
+  const { monitor, autoHandoff, setDecision, setPhase, setAssistantText } = fixture()
+  monitor.setEnabled(true)
+  await monitor.scanOnce()
+  setAssistantText('构建失败，需要你批准安装工具后继续。')
+  setDecision('not json')
+  setPhase(1)
+  await monitor.scanOnce()
+  expect(autoHandoff).not.toHaveBeenCalled()
+  expect(monitor.view().attention[0]?.attention?.decision).toMatchObject({ stage: 'needsYou', kind: 'approval' })
+})
+
+it('shows a newer user decision after an earlier Codex item was handed to DSH', async () => {
+  const { monitor, setDecision, setPhase, advanceMinutes } = fixture()
+  monitor.setEnabled(true)
+  await monitor.scanOnce()
+  monitor.setAutoHandoff(true)
+  advanceMinutes(1)
+  setDecision(JSON.stringify({ needsAttention: true, stage: 'failed', kind: 'failure',
+    reason: '构建失败', action: '检查构建', summary: '构建失败', evidence: '请检查发布结果' }))
+  setPhase(1)
+  await monitor.scanOnce()
+  setDecision(reviewDecision)
+  setPhase(2)
+  await monitor.scanOnce()
+  expect(monitor.view().managedTotal).toBe(1)
+  expect(monitor.view().attentionTotal).toBe(1)
+  expect(monitor.view().attention[0]?.attention?.itemId).toBe('answer-new-2')
+})
+
+it('keeps separate DSH tickets from two failed items in the same Codex conversation', async () => {
+  const { store, monitor, autoHandoff, setDecision, setPhase, advanceMinutes } = fixture()
+  autoHandoff.mockResolvedValueOnce('ticket-one').mockResolvedValueOnce('ticket-two')
+  monitor.setEnabled(true)
+  await monitor.scanOnce()
+  monitor.setAutoHandoff(true)
+  setDecision(JSON.stringify({ needsAttention: true, stage: 'failed', kind: 'failure',
+    reason: '执行失败', action: '修复任务', summary: '第二次失败摘要', evidence: '请检查发布结果' }))
+  advanceMinutes(1)
+  setPhase(1)
+  await monitor.scanOnce()
+  advanceMinutes(1)
+  setPhase(2)
+  await monitor.scanOnce()
+  store.tickets.save({ id: 'ticket-one', title: '第一次修复', updatedAt: '2026-11-01T12:31:00Z',
+    ended: { at: '2026-11-01T12:31:00Z', by: 'executor', outcome: 'completed' },
+    assignments: [{ report: { state: 'ready', summary: '第一次修复已完成', at: '2026-11-01T12:31:00Z' } }] } as Ticket)
+  store.tickets.save({ id: 'ticket-two', title: '第二次修复', updatedAt: '2026-11-01T12:32:00Z',
+    assignments: [] } as unknown as Ticket)
+  const managed = monitor.view().managed
+  expect(managed.map(row => row.handoffTicketId)).toEqual(['ticket-two', 'ticket-one'])
+  expect(managed.map(row => row.title)).toEqual(['第二次修复', '第一次修复'])
+  expect(managed[1]?.summary).toBe('第一次修复已完成')
+  expect(monitor.view().managedTotal).toBe(2)
+})
+
 it('does not hand off a historical failure when auto intake is enabled later', async () => {
   const { monitor, autoHandoff, setDecision } = fixture()
   monitor.setEnabled(true)
@@ -152,6 +288,24 @@ it('does not hand off an old failure if its assessment timestamp is refreshed wi
   const state = store.get('codex-monitor-v1') as { threads: Record<string, { assessment: { at: string } }> }
   state.threads['thread-a']!.assessment.at = '2026-11-01T12:31:00.000Z'
   store.set('codex-monitor-v1', state)
+  await monitor.scanOnce()
+  expect(autoHandoff).not.toHaveBeenCalled()
+})
+
+it('does not dispatch an old assistant item during assessment version migration', async () => {
+  const { store, monitor, autoHandoff, setDecision, advanceMinutes } = fixture()
+  monitor.setEnabled(true)
+  await monitor.scanOnce()
+  monitor.setAutoHandoff(true)
+  advanceMinutes(1)
+  const state = store.get('codex-monitor-v1') as { threads: Record<string, {
+    assessment: { version: number }; autoHandoffBaselineItemId?: string; autoHandoffFreshItemId?: string }> }
+  state.threads['thread-a']!.assessment.version = 2
+  state.threads['thread-a']!.autoHandoffBaselineItemId = 'tool-old'
+  state.threads['thread-a']!.autoHandoffFreshItemId = 'answer-old'
+  store.set('codex-monitor-v1', state)
+  setDecision(JSON.stringify({ needsAttention: true, stage: 'failed', kind: 'failure',
+    reason: '旧失败', action: '检查失败', summary: '旧任务失败', evidence: '正在处理' }))
   await monitor.scanOnce()
   expect(autoHandoff).not.toHaveBeenCalled()
 })
@@ -332,16 +486,93 @@ it('groups 31 child threads under one main conversation without 31 model calls',
   expect(requests.filter(method => method === 'thread/items/list')).toHaveLength(1)
 })
 
+it('counts failed child turn snapshots under the parent without opening child tickets', async () => {
+  const { monitor, stream, autoHandoff, setChildCount, setFailedChild } = fixture()
+  setChildCount(3)
+  setFailedChild('child-1')
+  await monitor.scanOnce()
+  expect(monitor.view().threads[0]).toMatchObject({ childCount: 3, childErrors: 1 })
+  expect(stream).toHaveBeenCalledTimes(1)
+  expect(autoHandoff).not.toHaveBeenCalled()
+})
+
+it('checks recent child turns in bounded batches and eventually includes later failures', async () => {
+  const { monitor, requests, setChildCount, setFailedChild, setChildUpdatesWithPhase, setPhase } = fixture()
+  setChildCount(80)
+  setFailedChild('child-75')
+  setChildUpdatesWithPhase(true)
+  await monitor.scanOnce()
+  expect(monitor.view().threads[0]).toMatchObject({ childCount: 80, childErrors: 0 })
+  expect(monitor.view()).toMatchObject({ recentChildTotal: 80, checkedRecentChildTotal: 60 })
+  expect(requests.filter(method => method === 'thread/turns/list')).toHaveLength(61)
+  setPhase(1)
+  await monitor.scanOnce()
+  expect(monitor.view().threads[0]).toMatchObject({ childCount: 80, childErrors: 1 })
+  expect(monitor.view()).toMatchObject({ recentChildTotal: 80, checkedRecentChildTotal: 60 })
+  expect(requests.filter(method => method === 'thread/turns/list')).toHaveLength(122)
+  await monitor.scanOnce()
+  expect(monitor.view()).toMatchObject({ recentChildTotal: 80, checkedRecentChildTotal: 80 })
+})
+
+it('shows child read failures, retries them, and preserves a known failure after the activity window', async () => {
+  const { monitor, setChildCount, setFailedChild, setFailedChildRead, advanceMinutes } = fixture()
+  setChildCount(1)
+  setFailedChildRead('child-0')
+  await monitor.scanOnce()
+  expect(monitor.view()).toMatchObject({ childReadErrorsTotal: 1, threads: [{ childReadErrors: 1, childErrors: 0 }] })
+  setFailedChildRead(undefined)
+  setFailedChild('child-0')
+  advanceMinutes(6)
+  await monitor.scanOnce()
+  expect(monitor.view()).toMatchObject({ childReadErrorsTotal: 0, threads: [{ childReadErrors: 0, childErrors: 1 }] })
+  advanceMinutes(24 * 60)
+  await monitor.scanOnce()
+  expect(monitor.view().threads[0]).toMatchObject({ childErrors: 1 })
+})
+
+it('keeps the last known child failure during a transient turn read error', async () => {
+  const { monitor, setChildCount, setFailedChild, setFailedChildRead, advanceMinutes } = fixture()
+  setChildCount(1)
+  setFailedChild('child-0')
+  await monitor.scanOnce()
+  expect(monitor.view().threads[0]).toMatchObject({ childErrors: 1, childReadErrors: 0 })
+  setFailedChildRead('child-0')
+  advanceMinutes(6)
+  await monitor.scanOnce()
+  expect(monitor.view().threads[0]).toMatchObject({ childErrors: 1, childReadErrors: 1 })
+  setFailedChildRead(undefined)
+  setFailedChild('none')
+  advanceMinutes(6)
+  await monitor.scanOnce()
+  expect(monitor.view().threads[0]).toMatchObject({ childErrors: 0, childReadErrors: 0 })
+})
+
+it('preserves the local repository when the RPC inventory has no Git origin', async () => {
+  const { monitor, autoHandoff, setLocalRows, setDecision, setPhase, advanceMinutes } = fixture()
+  setLocalRows([{ id: 'thread-a', name: 'Release task', sourceKind: 'vscode', archived: false,
+    repository: 'acme/widgets', updatedAt: '2026-11-01T10:46:40Z' }])
+  monitor.setEnabled(true)
+  await monitor.scanOnce()
+  monitor.setAutoHandoff(true)
+  advanceMinutes(1)
+  setDecision(JSON.stringify({ needsAttention: true, stage: 'failed', kind: 'failure',
+    reason: '执行失败', action: '修复问题', summary: '仓库构建失败', evidence: '请检查发布结果' }))
+  setPhase(1)
+  await monitor.scanOnce()
+  expect(autoHandoff.mock.calls[0]?.[0]).toMatchObject({ repository: 'acme/widgets' })
+})
+
 it('distinguishes child threads without a parent ID from those whose parent is unavailable', async () => {
-  const { monitor, setLocalRows } = fixture()
+  const { monitor, setLocalRows, setFailedChild } = fixture()
+  setFailedChild('child-other')
   setLocalRows([
-    { id: 'child-other', sourceKind: 'subAgentOther', archived: false },
+    { id: 'child-other', sourceKind: 'subAgentOther', archived: false, updatedAt: '2026-11-01T12:00:00Z' },
     { id: 'child-review', sourceKind: 'subAgentReview', archived: false },
     { id: 'child-missing', sourceKind: 'subAgentThreadSpawn', parentThreadId: 'missing-root', archived: false },
   ])
   await monitor.scanOnce()
   expect(monitor.view()).toMatchObject({ total: 1, childTotal: 3, unlinkedTotal: 3,
-    withoutParentTotal: 2, unresolvedParentTotal: 1 })
+    withoutParentTotal: 2, unresolvedParentTotal: 1, unlinkedChildErrors: 1 })
 })
 
 it('groups nested children and leaves parent cycles unresolved', async () => {

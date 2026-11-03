@@ -13,6 +13,20 @@ const stages: Record<string, { zh: string; en: string }> = {
   failed: { zh: '报告失败', en: 'Reported failed' },
   unknown: { zh: '待核对', en: 'Uncertain' },
 }
+const workState = (stage: { stage: string; action?: string } | undefined, chinese: boolean): string => {
+  if (!stage) return chinese ? '已接单' : 'Accepted'
+  if (stage.stage === 'person') {
+    const action = {
+      answer: { zh: '待回答', en: 'Needs an answer' }, review: { zh: '待审阅', en: 'Needs review' },
+      blocked: { zh: '受阻待处理', en: 'Blocked' }, failed: { zh: '失败待处理', en: 'Failed' },
+      delivery: { zh: '输入未送达', en: 'Delivery failed' },
+    }[stage.action ?? '']
+    return action ? (chinese ? action.zh : action.en) : (chinese ? '需要你处理' : 'Needs you')
+  }
+  if (stage.stage === 'ended') return chinese ? '已结束' : 'Ended'
+  if (stage.stage === 'idle') return chinese ? '等待后续' : 'Idle'
+  return stage.action === 'queued' ? (chinese ? '排队中' : 'Queued') : (chinese ? '执行中' : 'Working')
+}
 const timeText = (value: string | undefined, chinese: boolean): string => {
   if (!value) return '—'
   const date = new Date(value)
@@ -52,25 +66,27 @@ export function CodexPage() {
     </div>
     {error && <p className="dt-error" role="alert">{error.message}</p>}
     {monitor?.error && <p className="dt-error" role="alert">{monitor.error}</p>}
-    {monitor?.enabled && <p className="dt-hint">{chinese
-      ? '最近 7 天 ' + (monitor.recentTotal ?? monitor.total) + ' / 共 ' + monitor.total + ' 个主会话 · '
-        + linkedChildren + ' 个子线程归入主会话'
-        + (monitor.withoutParentTotal ? ' · ' + monitor.withoutParentTotal + ' 条无父会话记录' : '')
-        + (monitor.unresolvedParentTotal ? ' · ' + monitor.unresolvedParentTotal + ' 条父会话未找到' : '')
-        + (monitor.withoutParentTotal === undefined && monitor.unresolvedParentTotal === undefined
-          && monitor.unlinkedTotal ? ' · ' + monitor.unlinkedTotal + ' 个未归属' : '')
-        + (monitor.unclassifiedTotal ? ' · ' + monitor.unclassifiedTotal + ' 条来源未识别' : '')
-        + ' · 上次扫描 ' + timeText(monitor.scannedAt, true)
-        + ' · 历史观察'
-      : 'Last 7 days: ' + (monitor.recentTotal ?? monitor.total) + ' / ' + monitor.total + ' main conversations · '
-        + linkedChildren + ' child threads grouped'
-        + (monitor.withoutParentTotal ? ' · ' + monitor.withoutParentTotal + ' without parent ID' : '')
-        + (monitor.unresolvedParentTotal ? ' · ' + monitor.unresolvedParentTotal + ' parent not found' : '')
-        + (monitor.withoutParentTotal === undefined && monitor.unresolvedParentTotal === undefined
-          && monitor.unlinkedTotal ? ' · ' + monitor.unlinkedTotal + ' unlinked' : '')
-        + (monitor.unclassifiedTotal ? ' · ' + monitor.unclassifiedTotal + ' unclassified' : '')
-        + ' · scanned ' + timeText(monitor.scannedAt, false)
-        + ' · stored history'}</p>}
+    {monitor?.enabled && <div className="dt-hint">
+      <div>{chinese
+        ? `最近 7 天 ${monitor.recentTotal ?? monitor.total} / 共 ${monitor.total} 个主会话 · ${linkedChildren} 个子线程 · ${monitor.attentionTotal} 个需要你 · ${monitor.managedTotal ?? 0} 个 DSH 工单`
+        : `Last 7 days: ${monitor.recentTotal ?? monitor.total} / ${monitor.total} main conversations · ${linkedChildren} child threads · ${monitor.attentionTotal} need you · ${monitor.managedTotal ?? 0} DSH tickets`}</div>
+      <div>{chinese ? `历史快照 · 上次扫描 ${timeText(monitor.scannedAt, true)}`
+        : `Stored history · scanned ${timeText(monitor.scannedAt, false)}`}</div>
+      {!!monitor.recentChildTotal && <div>{chinese
+        ? `近 24 小时子线程状态已核对 ${monitor.checkedRecentChildTotal ?? 0} / ${monitor.recentChildTotal}`
+        : `Recent child turns checked: ${monitor.checkedRecentChildTotal ?? 0} / ${monitor.recentChildTotal}`}</div>}
+      {!!(monitor.unlinkedTotal || monitor.unclassifiedTotal || monitor.unlinkedChildErrors || monitor.childReadErrorsTotal) && <div>{chinese
+        ? [monitor.withoutParentTotal ? `${monitor.withoutParentTotal} 条子线程无父会话 ID` : '',
+          monitor.unresolvedParentTotal ? `${monitor.unresolvedParentTotal} 条父会话未找到` : '',
+          monitor.unlinkedChildErrors ? `${monitor.unlinkedChildErrors} 条未归属子线程历史失败` : '',
+          monitor.childReadErrorsTotal ? `${monitor.childReadErrorsTotal} 条子线程状态读取异常` : '',
+          monitor.unclassifiedTotal ? `${monitor.unclassifiedTotal} 条来源未识别` : ''].filter(Boolean).join(' · ')
+        : [monitor.withoutParentTotal ? `${monitor.withoutParentTotal} child threads without parent ID` : '',
+          monitor.unresolvedParentTotal ? `${monitor.unresolvedParentTotal} parent threads not found` : '',
+          monitor.unlinkedChildErrors ? `${monitor.unlinkedChildErrors} unlinked child failures in history` : '',
+          monitor.childReadErrorsTotal ? `${monitor.childReadErrorsTotal} child turn reads failed` : '',
+          monitor.unclassifiedTotal ? `${monitor.unclassifiedTotal} unclassified` : ''].filter(Boolean).join(' · ')}</div>}
+    </div>}
     {!monitor?.enabled && <p className="dt-hint">{chinese
       ? '启用后扫描本机已存储的 Codex 历史，并用当前 DSH 模型归纳变化的主会话。'
       : 'Scan stored Codex history and summarize changed main conversations with the current DSH model.'}</p>}
@@ -91,6 +107,23 @@ export function CodexPage() {
       </li>)}</ul>
     </section>}
 
+    {!!monitor?.autoHandoffEnabled && <section>
+      <h3>{chinese ? '已交给 DSH' : 'Managed by DSH'} · {monitor.managedTotal ?? 0}</h3>
+      {monitor.managed?.length ? <ul className="dt-list dt-cards">{monitor.managed.map(thread => <li className="dt-row"
+        key={`${thread.id}:${thread.handoffTicketId}`}>
+        <div className="dt-row-main">
+          <strong>{thread.title}</strong>
+          {thread.summary && <p className="dt-row-quote dt-clamp">{thread.summary}</p>}
+          <div className="dt-row-meta"><span>{workState(thread.handoffStage, chinese)} · {chinese ? 'DSH 当前状态' : 'DSH state'}</span>
+            <span>{timeText(thread.activityAt ?? thread.updatedAt, chinese)}</span></div>
+          {thread.handoffTicketId && <div className="dt-row-buttons"><Button variant="outline" size="sm"
+            onClick={() => navigate({ page: 'execution', id: thread.handoffTicketId! })}>{chinese ? '查看工单'
+              : 'Open ticket'}</Button></div>}
+        </div>
+      </li>)}</ul> : <p className="dt-hint">{chinese ? '尚无符合自动接单条件的新失败或技术阻塞。'
+        : 'No new failure or technical blocker qualifies for automatic work yet.'}</p>}
+    </section>}
+
     {!!monitor?.total && <section>
       <div className="dt-row-buttons"><h3>{scope === 'recent'
         ? (chinese ? '最近主会话' : 'Recent conversations')
@@ -107,7 +140,10 @@ export function CodexPage() {
           <div className="dt-row-meta"><span>{thread.stage ? (chinese ? stages[thread.stage]?.zh : stages[thread.stage]?.en)
             : (chinese ? '尚未归纳' : 'Not summarized')}</span>
             <span>{timeText(thread.activityAt ?? thread.updatedAt, chinese)}</span>
+            {thread.repository && <span>{thread.repository}</span>}
             {!!thread.childCount && <span>{thread.childCount} {chinese ? '个子线程' : 'child threads'}</span>}
+            {!!thread.childErrors && <span>{thread.childErrors} {chinese ? '个子线程历史失败' : 'child failures in history'}</span>}
+            {!!thread.childReadErrors && <span>{thread.childReadErrors} {chinese ? '个子线程读取异常' : 'child reads failed'}</span>}
             {thread.archived && <span>{chinese ? '已归档' : 'Archived'}</span>}
             <span className="dt-mono">{thread.id}</span></div>
           {thread.handoffTicketId && <div className="dt-row-buttons"><Button variant="outline" size="sm"

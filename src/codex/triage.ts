@@ -39,6 +39,30 @@ export const MAX_CODEX_TRIAGE_TEXT_CHARS = 80
 export const MAX_CODEX_TRIAGE_SUMMARY_CHARS = 120
 export const MAX_CODEX_TRIAGE_MODEL_CHARS = 5000
 
+/** Conservative, text-grounded human action request; a model's blocked/failed label cannot override it. */
+export function userDecisionRequest(text: string): { kind: 'approval' | 'question' | 'review'; evidence: string } | undefined {
+  const cleaned = text
+    .replace(/(?:不需要|无需|不必|不用).{0,16}(?:批准|审批|同意|确认|授权|许可)/g, '')
+    .replace(/\b(?:do not|don't|no) need (?:your|user) (?:approval|confirmation|permission|consent)\b/gi, '')
+  const patterns = [
+    /(?:你|您|用户|人工).{0,30}(?:批准|审批|同意|确认|授权|许可|答复|回答|选择|决定|提供|审阅|审核)/i,
+    /(?:请|需要|等待|待).{0,24}(?:批准|审批|同意|确认|授权|许可)/i,
+    /\b(?:can|could|would|will)\s+you(?:\s+please)?\s+(?:approve|confirm|authorize|provide|decide|choose|review|answer)\b/i,
+    /\b(?:please|kindly)\s+(?:approve|confirm|authorize|provide|decide|choose|review|answer)\b/i,
+    /\b(?:need|require|await|waiting for).{0,40}(?:you|your|user|human).{0,40}(?:approv|confirm|permission|consent|input|decision|choos|provid|review)/i,
+    /\b(?:need|require|waiting for).{0,40}(?:approv|confirm|permission|consent|input|decision).{0,24}(?:from|by) (?:you|user|human)/i,
+  ]
+  const match = patterns.flatMap(pattern => {
+    const found = pattern.exec(cleaned)
+    return found ? [{ at: found.index, text: found[0] }] : []
+  }).sort((a, b) => a.at - b.at)[0]
+  if (!match) return undefined
+  const kind = /批准|审批|同意|确认|授权|许可|approv|confirm|authoriz|permission|consent/i.test(match.text)
+    ? 'approval' : /审阅|审核|review/i.test(match.text) ? 'review' : 'question'
+  return { kind, evidence: (text.includes(match.text) ? match.text : text).slice(0, MAX_CODEX_TRIAGE_TEXT_CHARS) }
+}
+export const hasUserDecisionRequest = (text: string): boolean => !!userDecisionRequest(text)
+
 const kinds: readonly CodexTriageKind[] = ['approval', 'question', 'review', 'blocked', 'failure', 'none']
 const stages: readonly CodexTriageStage[] = [
   'progress',
@@ -101,6 +125,7 @@ export function buildCodexTriagePrompt(input: CodexTriageInput): string {
     'reportedComplete 表示普通完成；kind 为 none，needsAttention 为 false。',
     'needsYou 仅在最新 assistant 消息明确要求用户现在批准、答复或审阅时使用；kind 为 approval、question 或 review，needsAttention 为 true。',
     'blocked 或 failed 仅在有明确失败或阻塞证据时使用；kind 分别为 blocked 或 failure，needsAttention 为 true。',
+    'blocked 只表示助手明确报告的技术阻塞；若下一步必须由用户批准、提供信息或做决定，使用 needsYou。',
     'unknown 用于证据不足；kind 为 none，needsAttention 为 false。',
     '只有在 stage 为 needsYou、blocked 或 failed 时，needsAttention 才为 true。',
     '子智能体给父代理的汇报、审阅请求和普通完成由父代理处理，不需要用户介入；只有明确要求用户亲自处理时才提醒。',

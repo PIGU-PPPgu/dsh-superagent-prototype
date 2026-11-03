@@ -8,7 +8,7 @@ dsh-superagent is a proactive coding agent for configured GitHub repositories, p
 
 It is also a way of working with an agent: **take as little human attention as possible, and give as much value as possible.** An agent that can act for a whole team can also waste a whole team's attention, so it acts only when asked or when a rule the team wrote allows it, and speaks only when someone must act or can use a result. [docs/000-philosophy.md](docs/000-philosophy.md) explains the principle and what it asks of the operator.
 
-On a Mac, an optional Codex monitor finds conversations with local rollout files, groups child threads under each main conversation, and shows recent progress and attention in the Superagent panel. It reads stored history and never controls an existing Codex thread.
+On a Mac, an optional Codex monitor finds conversations with local rollout files, groups child threads under each main conversation, checks recent child turn outcomes and shows attention and DSH Tickets in the Superagent panel. Separately enabled automatic handoff accepts new assistant-evidenced failures and technical blockers into isolated DSH Tickets. Codex observations come from stored history; the monitor never controls an existing Codex thread. See [the Codex monitor guide](docs/011-codex-monitor.md).
 
 ## Setup
 
@@ -33,7 +33,7 @@ Read the numbered documents in order; each builds only on the ones before it.
 - [008 Cookbook](docs/008-cookbook.md): adding a Source
 - [009 Codex read-only experiment](docs/009-codex-read-only.md): observe an explicit allowlist of existing Codex threads through a Mac-side bridge
 - [010 Codex cloud validation](docs/010-codex-cloud-validation.md): a real cloud Codex CLI thread discovered and exported through the local GUI, with the model-network blocker recorded
-- [011 Codex monitor](docs/011-codex-monitor.md): automatic observation of locally stored Codex conversations and panel attention
+- [011 Codex monitor](docs/011-codex-monitor.md): locally stored Codex history, attention and optional automatic DSH Tickets
 
 For a Mac-local history-only GUI, install dependencies and run `pnpm codex:local`; see [the Codex trial guide](docs/009-codex-read-only.md). The GUI needs no model API key and cannot determine live Codex Desktop status.
 

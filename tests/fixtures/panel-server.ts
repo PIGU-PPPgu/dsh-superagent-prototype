@@ -183,6 +183,7 @@ const overviewView = (): ApiResponse<'GET overview'> => {
   const setup = problem ?? feishuProblem
   return {
     codexAttention: server.codex.attentionTotal,
+    codexManaged: server.codex.managedTotal,
     codexEnabled: server.codex.enabled,
     codexRecentTotal: server.codex.recentTotal ?? 0,
     codexTotal: server.codex.total,
@@ -192,6 +193,9 @@ const overviewView = (): ApiResponse<'GET overview'> => {
       id: thread.id, title: thread.title, reason: thread.attention?.decision.reason ?? '',
       action: thread.attention?.decision.action ?? '',
     })),
+    codexManagedItems: server.codex.managed.slice(0, 3).flatMap(thread => thread.handoffTicketId
+      ? [{ id: thread.id, title: thread.title, ticketId: thread.handoffTicketId,
+        ...(thread.summary ? { summary: thread.summary } : {}) }] : []),
     problems: [...setup ? [{ kind: 'setup' as const, ...setup }] : [],
       ...KINDS.some(kind => server.settings.sources[kind.kind]?.enabled !== false) ? [] : [{ kind: 'no-source' as const }],
       ...feishuProblem || server.settings.sources.feishu?.enabled === false ? [] : [{ kind: 'source-error' as const, source: { id: 'feishu',
@@ -259,7 +263,7 @@ function initial(): PanelServer {
     en: 'Feishu message' } }
   const defaults = { revision: 0, previousRevision: null, savedAt: '', source: 'defaults' }
   return {
-    codex: { enabled: false, total: 0, attentionTotal: 0, attention: [], threads: [] },
+    codex: { enabled: false, total: 0, attentionTotal: 0, attention: [], managedTotal: 0, managed: [], threads: [] },
     health: {}, down: false, pending: 0, opened: [], requests: [], misuse: [], queued: new Set(), dropped: [], failing: [],
     setup: { machine: MACHINE, problem: null, feishuProblem: null,
       accounts: { repository: 'acme/widgets', agent: 'agent-bot', bindings: [], feishu: { appId: 'cli_bot', brand: 'feishu', botId: 'ou_bot',

@@ -8,10 +8,10 @@ let h: Host
 beforeEach(async () => { h = await startRuntime() })
 afterEach(async () => { await h.stop() })
 
-async function codexTicket(workspaceMode: 'analysis' | 'execute', repository = 'acme/widgets') {
+async function codexTicket(workspaceMode: 'analysis' | 'execute', repository = 'acme/widgets', stage?: 'failed' | 'blocked') {
   h.subprocess.spawn.mockClear()
   const candidate: CodexFailureCandidate = { threadId: `thread-${workspaceMode}-${repository.replace(/\W/g, '-')}`, itemId: 'item', title: 'Codex handoff',
-    summary: 'Failure', evidence: 'Reported', repository, messages: [] }
+    summary: 'Failure', evidence: 'Reported', repository, messages: [], ...(stage ? { stage } : {}) }
   const id = await (h.runtime as unknown as { acceptCodexFailure(candidate: CodexFailureCandidate, signal: AbortSignal): Promise<string> })
     .acceptCodexFailure(candidate, new AbortController().signal)
   const ticket = h.runtime.store.tickets.get(id)!
@@ -36,6 +36,13 @@ it('clones always the bound repository before starting the Codex execute workspa
     env: expect.objectContaining({ DSH_SUPERAGENT_GITHUB_BINDING: 'default' }) }))
   await expect(h.runTool(`worker-${ticket.id}`, 'orchestrator_thread_follow', { thread: 'feishu:oc_team:om_1', reason: 'related' }))
     .rejects.toThrow('Codex tickets cannot follow external threads')
+})
+
+it('accepts an evidenced technical blockage with a bounded repair mandate', async () => {
+  const { ticket, trigger } = await codexTicket('execute', 'acme/widgets', 'blocked')
+  expect(ticket.mandate.scope).toContain('technical blockage')
+  expect(trigger.text).toContain('Codex historical technical blocker')
+  expect(ticket.channels).toEqual([])
 })
 
 it('keeps Codex worker reports in the Superagent panel without main-Session relays', async () => {

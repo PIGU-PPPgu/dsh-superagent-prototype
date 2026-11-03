@@ -28,12 +28,16 @@ it('enables Codex auto handoff only after an explicit panel action', async () =>
 
 it('links a Codex handoff to its ticket and shows a failed handoff', async () => {
   server.codex = { enabled: true, autoHandoffEnabled: true, total: 2, recentTotal: 2,
-    attentionTotal: 0, attention: [], threads: [
+    attentionTotal: 0, attention: [], managedTotal: 1,
+    managed: [{ id: 'thread-a', title: '发布任务', sourceKind: 'vscode', archived: false, present: true,
+      handoffTicketId: 't1', handoffStage: { stage: 'working' } }], threads: [
       { id: 'thread-a', title: '发布任务', sourceKind: 'vscode', archived: false, present: true, handoffTicketId: 't1' },
       { id: 'thread-b', title: '构建任务', sourceKind: 'cli', archived: false, present: true, handoffError: 'Codex handoff unavailable' },
     ] }
   await mount()
   await click(tab(zh['tab.codex']))
+  expect(text()).toContain('已交给 DSH · 1')
+  expect(text()).toContain('执行中 · DSH 当前状态')
   await click('查看工单')
   expect(text()).toContain('修复回归')
   await click(tab(zh['tab.codex']))
@@ -45,15 +49,18 @@ it('surfaces an actionable Codex conversation on the overview and lets the perso
   const attention = { decision: { needsAttention: true as const, kind: 'review' as const,
     reason: '结果待审阅', action: '检查发布结果' }, at: '2026-11-01T12:00:00Z', itemId: 'item-new' }
   server.codex = { enabled: true, scannedAt: '2026-11-01T12:00:00Z', total: 1, recentTotal: 1, attentionTotal: 1,
+    managedTotal: 0, managed: [],
     attention: [{ id: 'thread-a', title: '发布任务', sourceKind: 'vscode', archived: false, present: true, attention }],
     threads: [{ id: 'thread-a', title: '发布任务', sourceKind: 'vscode', archived: false, present: true, attention }] }
   await mount()
-  expect(text()).toContain('最近 7 天 1 / 共 1 个主会话 · 1 个需处理')
+  expect(text()).toContain('最近 7 天 1 / 共 1 个主会话')
+  expect(text()).toContain('1 个需处理')
   expect(text()).toContain('检查发布结果')
   await click(tab(zh['tab.codex']))
+  expect(text()).toContain('1 个需要你')
   expect(text()).toContain('需要你处理')
   expect(text()).toContain('检查发布结果')
-  expect(text()).toContain('历史观察')
+  expect(text()).toContain('历史快照')
   await click('关闭提醒')
   expect(server.requests.some(request => request.path === 'codex/attention/thread-a/ack' && request.method === 'POST'
     && (request.body as { itemId?: string })?.itemId === 'item-new')).toBe(true)
@@ -62,14 +69,21 @@ it('surfaces an actionable Codex conversation on the overview and lets the perso
 
 it('shows main conversation summaries and groups child threads', async () => {
   server.codex = { enabled: true, scannedAt: '2026-11-01T12:00:00Z', total: 2, recentTotal: 1,
-    threadTotal: 33, childTotal: 31, attentionTotal: 0, attention: [], threads: [{
+    threadTotal: 33, childTotal: 31, recentChildTotal: 31, checkedRecentChildTotal: 30, childReadErrorsTotal: 1,
+    attentionTotal: 0, attention: [], managedTotal: 0, managed: [], threads: [{
       id: 'thread-a', title: '发布任务', sourceKind: 'vscode', archived: false, present: true,
-      stage: 'progress', summary: '正在核查发布结果', childCount: 31, activityAt: '2026-11-01T12:00:00Z',
+      stage: 'progress', summary: '正在核查发布结果', childCount: 31, childErrors: 2, childReadErrors: 1,
+      repository: 'acme/widgets', activityAt: '2026-11-01T12:00:00Z',
     }] }
   await mount()
   await click(tab(zh['tab.codex']))
   expect(text()).toContain('最近 7 天 1 / 共 2 个主会话')
-  expect(text()).toContain('31 个子线程归入主会话')
+  expect(text()).toContain('31 个子线程')
+  expect(text()).toContain('近 24 小时子线程状态已核对 30 / 31')
+  expect(text()).toContain('2 个子线程历史失败')
+  expect(text()).toContain('1 个子线程读取异常')
+  expect(text()).toContain('1 条子线程状态读取异常')
+  expect(text()).toContain('acme/widgets')
   expect(text()).toContain('正在核查发布结果')
   expect(text()).toContain('31 个子线程')
   await click('查看全部')
@@ -78,13 +92,14 @@ it('shows main conversation summaries and groups child threads', async () => {
 
 it('shows why child threads cannot be grouped under a main conversation', async () => {
   server.codex = { enabled: true, total: 1, recentTotal: 1, childTotal: 28, unlinkedTotal: 27,
-    withoutParentTotal: 26, unresolvedParentTotal: 1,
-    attentionTotal: 0, attention: [], threads: [{ id: 'thread-a', title: '发布任务',
+    withoutParentTotal: 26, unresolvedParentTotal: 1, unlinkedChildErrors: 1,
+    attentionTotal: 0, attention: [], managedTotal: 0, managed: [], threads: [{ id: 'thread-a', title: '发布任务',
       sourceKind: 'vscode', archived: false, present: true, childCount: 1 }] }
   await mount()
   await click(tab(zh['tab.codex']))
-  expect(text()).toContain('1 个子线程归入主会话')
-  expect(text()).toContain('26 条无父会话记录')
+  expect(text()).toContain('1 个子线程')
+  expect(text()).toContain('26 条子线程无父会话 ID')
   expect(text()).toContain('1 条父会话未找到')
-  expect(text()).not.toContain('28 个子线程归入主会话')
+  expect(text()).toContain('1 条未归属子线程历史失败')
+  expect(text()).not.toContain('28 个子线程 ·')
 })

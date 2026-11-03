@@ -6,6 +6,7 @@ import {
   MAX_CODEX_TRIAGE_SUMMARY_CHARS,
   MAX_CODEX_TRIAGE_TEXT_CHARS,
   buildCodexTriagePrompt,
+  hasUserDecisionRequest,
   parseCodexTriageDecision,
 } from '../src/codex/triage.ts'
 
@@ -20,6 +21,20 @@ const input = {
     { role: 'assistant' as const, text: '需要批准部署' },
   ],
 }
+
+it('keeps mixed failures that request a human decision out of automatic handoff', () => {
+  expect(hasUserDecisionRequest('构建失败，需要你批准安装工具后继续。')).toBe(true)
+  expect(hasUserDecisionRequest('运行受阻，请先确认是否允许修改生产配置。')).toBe(true)
+  expect(hasUserDecisionRequest('Build failed; we need you to approve the new permission.')).toBe(true)
+  expect(hasUserDecisionRequest('Build failed; need approval from you before continuing.')).toBe(true)
+  expect(hasUserDecisionRequest('Please approve the installation.')).toBe(true)
+  expect(hasUserDecisionRequest('Build failed. Can you approve installing the missing tool?')).toBe(true)
+  expect(hasUserDecisionRequest('Build is blocked. Could you approve the required permission?')).toBe(true)
+  expect(hasUserDecisionRequest('Tests failed. Could you confirm whether I should update the lockfile?')).toBe(true)
+  expect(hasUserDecisionRequest('Please review these changes before I continue.')).toBe(true)
+  expect(hasUserDecisionRequest('You do not need your approval for this local check.')).toBe(false)
+  expect(hasUserDecisionRequest('构建失败，已定位到依赖版本，正在修复。')).toBe(false)
+})
 
 it('builds a bounded prompt with untrusted conversation data', () => {
   const prompt = buildCodexTriagePrompt(input)

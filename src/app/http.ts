@@ -182,12 +182,15 @@ function routes(runtime: HttpHost): Routes {
         executorLoad(store, runtime.executor.activeCount()), runtime.setupProblem ?? runtime.feishuProblem)
       return { ...page, problems: monitor.enabled ? page.problems.filter(problem =>
         problem.kind !== 'no-source' && problem.kind !== 'no-allowed') : page.problems,
-        codexAttention: monitor.attentionTotal,
+        codexAttention: monitor.attentionTotal, codexManaged: monitor.managedTotal,
         codexEnabled: monitor.enabled, codexRecentTotal: monitor.recentTotal ?? 0, codexTotal: monitor.total,
         codexRecentItems: monitor.threads.map(thread => ({ id: thread.id, title: thread.title,
           ...(thread.summary ? { summary: thread.summary } : {}) })),
         codexItems: monitor.attention.slice(0, 3).map(thread => ({ id: thread.id, title: thread.title,
-          reason: thread.attention?.decision.reason ?? '', action: thread.attention?.decision.action ?? '' })) }
+          reason: thread.attention?.decision.reason ?? '', action: thread.attention?.decision.action ?? '' })),
+        codexManagedItems: monitor.managed.slice(0, 3).flatMap(thread => thread.handoffTicketId
+          ? [{ id: thread.id, title: thread.title, ticketId: thread.handoffTicketId,
+            ...(thread.summary ? { summary: thread.summary } : {}) }] : []) }
     },
     'GET search': ({ query }) => search(views(runtime), query.q ?? '', runtime.sourceLinks),
     'GET sources': () => sourcesStatus(views(runtime), runtime.health, setupState(runtime)),

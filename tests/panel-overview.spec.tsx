@@ -18,6 +18,16 @@ it('shows monitored Codex activity on the overview even when no conversation nee
   expect(tab(zh['tab.codex']).getAttribute('aria-selected')).toBe('true')
 })
 
+it('shows managed Codex work on the overview and opens its DSH Ticket', async () => {
+  server.codex = { ...server.codex, enabled: true, total: 3, recentTotal: 3, managedTotal: 1,
+    managed: [{ id: 'codex-a', title: '修复构建', sourceKind: 'vscode', archived: false, present: true,
+      handoffTicketId: 't0', summary: '构建已交给 DSH 处理' }] }
+  await mount()
+  expect(text()).toContain('1 个 DSH 工单')
+  await click('修复构建')
+  expect(tab(zh['tab.execution']).getAttribute('aria-selected')).toBe('true')
+})
+
 it('leads the overview with the pending Tickets, then problems, the last day and the Executor, each linking to its stage', async () => {
   await mount()
   expect(tab(zh['tab.overview']).getAttribute('aria-selected')).toBe('true')

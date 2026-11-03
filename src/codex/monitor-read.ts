@@ -43,6 +43,16 @@ const ListedThread = z.looseObject({
 const TurnPage = z.looseObject({
   data: z.array(z.looseObject({ id: z.string(), status: z.string() })).max(1),
 })
+
+/** Latest persisted turn metadata; this is not the Desktop process's live turn state. */
+export async function readLatestCodexTurn(rpc: CodexMonitorRpc, threadId: string, signal: AbortSignal):
+  Promise<{ id: string; status: string } | undefined> {
+  checkCancelled(signal)
+  const page = TurnPage.parse(await rpc.request('thread/turns/list', {
+    threadId, limit: 1, sortDirection: 'desc', itemsView: 'summary',
+  }, signal))
+  return page.data[0]
+}
 const ItemEntry = z.looseObject({
   turnId: z.string(),
   item: z.looseObject({
@@ -137,14 +147,14 @@ export async function readRecentCodexMessages(rpc: CodexMonitorRpc, threadId: st
   options: CodexRecentMessagesOptions = {}): Promise<{
     latestTurnId?: string
     latestTurnStatus?: string
+    latestAssistantItemId?: string
+    latestAssistantTurnId?: string
     newestItemId?: string
     messages: { id: string; turnId: string; role: 'user' | 'assistant'; text: string }[]
     complete: boolean
   }> {
   checkCancelled(signal)
-  const turns = TurnPage.parse(await rpc.request('thread/turns/list', {
-    threadId, limit: 1, sortDirection: 'desc', itemsView: 'summary',
-  }, signal)).data[0]
+  const turns = await readLatestCodexTurn(rpc, threadId, signal)
 
   const messages: { id: string; turnId: string; role: 'user' | 'assistant'; text: string }[] = []
   const cursors = new Set<string>()
@@ -183,9 +193,11 @@ export async function readRecentCodexMessages(rpc: CodexMonitorRpc, threadId: st
   }
 
   messages.reverse()
+  const latestAssistant = [...messages].reverse().find(message => message.role === 'assistant')
   const complete = reachedBoundary && itemCount < MAX_ITEMS && messages.length < MAX_MESSAGES
   return {
     ...(turns ? { latestTurnId: turns.id, latestTurnStatus: turns.status } : {}),
+    ...(latestAssistant ? { latestAssistantItemId: latestAssistant.id, latestAssistantTurnId: latestAssistant.turnId } : {}),
     ...(newestItemId ?? options.sinceItemId ? { newestItemId: newestItemId ?? options.sinceItemId } : {}),
     messages,
     complete,

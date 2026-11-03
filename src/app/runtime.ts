@@ -234,7 +234,7 @@ export class Runtime extends Service implements SourceHost {
     return ticketEnvironment({ deployment: selected ? { ...deployment, ...selected } : deployment,
       sources, settings: this.store.settings(), ticket, ...trigger ? { trigger } : {} })
   }
-  /** Accept only new, assistant-evidenced failures in a separate DSH ticket. */
+  /** Accept only new, assistant-evidenced failures or technical blockers in a separate DSH ticket. */
   private async acceptCodexFailure(candidate: CodexFailureCandidate, signal: AbortSignal): Promise<string> {
     signal.throwIfAborted()
     if (this.closing() || this.paused()) throw new Error('Codex handoff is unavailable while DSH is paused')
@@ -256,16 +256,19 @@ export class Runtime extends Service implements SourceHost {
       threads: [{ source: 'codex', id: key('codex-item', candidate.threadId, candidate.itemId) }],
       actor: { source: 'codex', id: 'local-codex-monitor' }, human: true, addressed: 'direct',
       at: now(),
-      text: JSON.stringify({ kind: 'Codex historical failure', threadId: candidate.threadId,
+      text: JSON.stringify({ kind: candidate.stage === 'blocked' ? 'Codex historical technical blocker' : 'Codex historical failure',
+        threadId: candidate.threadId, ...(candidate.turnId ? { turnId: candidate.turnId } : {}),
         title: candidate.title.slice(0, 200), summary: candidate.summary.slice(0, 300),
         evidence: candidate.evidence.slice(0, 200),
         messages: candidate.messages.slice(-6).map(message => ({ role: message.role, text: message.text.slice(0, 1_500) })) }),
       meta: { threadId: candidate.threadId, itemId: candidate.itemId,
+        ...(candidate.turnId ? { turnId: candidate.turnId } : {}),
         ...(candidate.repository ? { repository: candidate.repository } : {}), githubBinding, workspaceMode },
     }
+    const condition = candidate.stage === 'blocked' ? 'technical blockage' : 'failure'
     const scope = workspaceMode === 'execute'
-      ? `Investigate the reported Codex failure in ${candidate.repository} and complete the bounded repair in this ticket's isolated checkout.`
-      : 'Investigate the reported Codex failure in this ticket\'s isolated workspace and report a diagnosis.'
+      ? `Investigate the reported Codex ${condition} in ${candidate.repository} and complete the bounded repair in this ticket's isolated checkout.`
+      : `Investigate the reported Codex ${condition} in this ticket's isolated workspace and report a diagnosis.`
     this.authorizedCodexHandoffs.add(trigger.id)
     this.quiet++
     try {
@@ -283,7 +286,7 @@ export class Runtime extends Service implements SourceHost {
           ticketId = active.id
         } else {
           const decision = engine.decide(trigger.id, { kind: 'accept', title: `Codex: ${candidate.title.slice(0, 120)}`,
-            scope, reason: 'New assistant-evidenced Codex failure', name: 'codex-failure',
+            scope, reason: `New assistant-evidenced Codex ${condition}`, name: 'codex-recovery',
             note: workspaceMode === 'execute'
               ? 'This is a historical Codex snapshot. Work only in this ticket workspace. Do not send messages to, resume, or interrupt the original Codex conversation.'
               : 'This is a historical Codex snapshot. Diagnose in this empty ticket workspace. Do not use a GitHub account, clone an unrelated repository, or write to the original Codex conversation.' })

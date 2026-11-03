@@ -80,7 +80,8 @@ it('reads backwards to sinceItemId and returns only chronological user/agent tex
   })
   const result = await readRecentCodexMessages(rpc, 'thread-a', signal, { sinceItemId: 'cursor-item' })
   expect(result).toEqual({
-    latestTurnId: 'turn-new', latestTurnStatus: 'completed', newestItemId: 'command-new', complete: true,
+    latestTurnId: 'turn-new', latestTurnStatus: 'completed', newestItemId: 'command-new',
+    latestAssistantItemId: 'answer-2', latestAssistantTurnId: 'turn-new', complete: true,
     messages: [
       { id: 'question-1', turnId: 'turn-old', role: 'user', text: 'First question' },
       { id: 'answer-1', turnId: 'turn-old', role: 'assistant', text: 'First answer' },

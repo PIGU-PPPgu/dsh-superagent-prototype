@@ -79,12 +79,15 @@ export function OverviewPage() {
     </Section>
     {data.codexEnabled && <Section title={t('tab.codex')} action={more({ page: 'codex' })}>
       <p className="dt-hint">{t('tab.codex') === 'Codex 观察'
-        ? `最近 7 天 ${data.codexRecentTotal ?? 0} / 共 ${data.codexTotal ?? 0} 个主会话 · ${data.codexAttention ?? 0} 个需处理`
-        : `Last 7 days: ${data.codexRecentTotal ?? 0} / ${data.codexTotal ?? 0} main conversations · ${data.codexAttention ?? 0} need attention`}</p>
-      <ul className="dt-list dt-cards">{(data.codexAttention ? data.codexItems ?? [] : data.codexRecentItems ?? []).map(item => <li className="dt-row dt-link" key={item.id}>
+        ? `最近 7 天 ${data.codexRecentTotal ?? 0} / 共 ${data.codexTotal ?? 0} 个主会话 · ${data.codexAttention ?? 0} 个需处理 · ${data.codexManaged ?? 0} 个 DSH 工单`
+        : `Last 7 days: ${data.codexRecentTotal ?? 0} / ${data.codexTotal ?? 0} main conversations · ${data.codexAttention ?? 0} need attention · ${data.codexManaged ?? 0} DSH tickets`}</p>
+      <ul className="dt-list dt-cards">{(data.codexAttention ? data.codexItems ?? []
+        : data.codexManaged ? data.codexManagedItems ?? [] : data.codexRecentItems ?? []).map(item => <li className="dt-row dt-link"
+          key={'ticketId' in item ? `${item.id}:${item.ticketId}` : item.id}>
         <div className="dt-row-main">
           <div className="dt-row-title"><button type="button" className="dt-open dt-open-wrap"
-            onClick={() => navigate({ page: 'codex' })}>{item.title}</button></div>
+            onClick={() => navigate('ticketId' in item && typeof item.ticketId === 'string'
+              ? { page: 'execution', id: item.ticketId } : { page: 'codex' })}>{item.title}</button></div>
           {'action' in item ? <p className="dt-row-quote dt-clamp">{item.action || item.reason}</p>
             : item.summary && <p className="dt-row-quote dt-clamp">{item.summary}</p>}
         </div>
