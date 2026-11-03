@@ -26,6 +26,25 @@ it('enables Codex auto handoff only after an explicit panel action', async () =>
   expect(server.requests).toContainEqual({ path: 'codex/auto-handoff', method: 'POST', body: { enabled: false } })
 })
 
+it('shows the DSH Router brief and keeps native control disabled until the bridge reports ready', async () => {
+  server.codex = { ...server.codex, enabled: true, total: 2, recentTotal: 2 }
+  server.codexRouter = { mainTotal: 2, recentTotal: 2, childTotal: 3, childChecked: 2,
+    needsYou: 1, technical: 0, managed: 1, priorities: [{ threadId: 'thread-a', title: '发布任务',
+      summary: '选择发布目标', kind: 'needsYou' }], recent: [] }
+  await mount()
+  await click(tab(zh['tab.codex']))
+  expect(text()).toContain('路由简报')
+  expect(text()).toContain('选择发布目标')
+  expect(text()).toContain('等待原生桥连接')
+  const enable = [...document.querySelectorAll('button')].find(button => button.textContent === '启用自动控制')!
+  expect(enable.hasAttribute('disabled')).toBe(true)
+  server.codexControl = { ...server.codexControl, bridgeReady: true }
+  await click(tab(zh['tab.overview']))
+  await click(tab(zh['tab.codex']))
+  await click('启用自动控制')
+  expect(server.requests).toContainEqual({ path: 'codex/control', method: 'POST', body: { enabled: true } })
+})
+
 it('links a Codex handoff to its ticket and shows a failed handoff', async () => {
   server.codex = { enabled: true, autoHandoffEnabled: true, total: 2, recentTotal: 2,
     attentionTotal: 0, attention: [], managedTotal: 1,

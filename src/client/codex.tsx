@@ -45,9 +45,12 @@ export function CodexPage() {
     [call, restarts, offset, scope], 10_000)
   const toggle = useAction((enabled: boolean) => call('POST codex/monitor', { body: { enabled } }), { reload })
   const autoHandoff = useAction((enabled: boolean) => call('POST codex/auto-handoff', { body: { enabled } }), { reload })
+  const controlToggle = useAction((enabled: boolean) => call('POST codex/control', { body: { enabled } }), { reload })
   const acknowledge = useAction((id: string, itemId: string, at: string) =>
     call('POST codex/attention/:id/ack', { id, body: { itemId, at } }), { reload })
   const monitor = data?.monitor
+  const router = data?.router
+  const control = data?.control
   const listed = scope === 'recent' ? (monitor?.recentTotal ?? monitor?.total ?? 0) : (monitor?.total ?? 0)
   const linkedChildren = Math.max(0, (monitor?.childTotal ?? 0) - (monitor?.unlinkedTotal ?? 0))
   const changeScope = () => { setOffset(0); setScope(scope === 'recent' ? 'all' : 'recent') }
@@ -90,6 +93,42 @@ export function CodexPage() {
     {!monitor?.enabled && <p className="dt-hint">{chinese
       ? '启用后扫描本机已存储的 Codex 历史，并用当前 DSH 模型归纳变化的主会话。'
       : 'Scan stored Codex history and summarize changed main conversations with the current DSH model.'}</p>}
+
+    {monitor?.enabled && <section>
+      <h3>{chinese ? '路由简报' : 'Router brief'}</h3>
+      {router?.priorities.length ? <ul className="dt-list dt-cards">{router.priorities.slice(0, 3).map(item =>
+        <li className="dt-row" key={`${item.kind}:${item.threadId}:${item.ticketId ?? ''}`}><div className="dt-row-main">
+          <strong>{item.title}</strong>
+          <p className="dt-row-quote dt-clamp">{item.summary}</p>
+          <div className="dt-row-meta"><span>{item.kind === 'needsYou' ? (chinese ? '需要你' : 'Needs you')
+            : item.kind === 'ticketNeedsYou' ? (chinese ? 'DSH 工单待处理' : 'DSH ticket needs you')
+              : item.kind === 'technical' ? (chinese ? '技术异常' : 'Technical issue')
+                : (chinese ? '子线程历史失败' : 'Child failure in history')}</span></div>
+          {item.ticketId && <div className="dt-row-buttons"><Button variant="outline" size="sm"
+            onClick={() => navigate({ page: 'execution', id: item.ticketId! })}>{chinese ? '查看工单' : 'Open ticket'}</Button></div>}
+        </div></li>)}</ul> : <p className="dt-hint">{router?.recent.length
+        ? (chinese ? `最近记录：${router.recent[0]!.title} · ${router.recent[0]!.summary}`
+          : `Latest: ${router.recent[0]!.title} · ${router.recent[0]!.summary}`)
+        : (chinese ? '等待新的会话变化。' : 'Waiting for conversation changes.')}</p>}
+    </section>}
+
+    {control && <section>
+      <div className="dt-row-buttons"><h3>{chinese ? '会话控制' : 'Session control'}</h3>
+        <Button variant="outline" size="sm" disabled={controlToggle.busy || !control.bridgeReady && !control.enabled}
+          onClick={() => { void controlToggle.run(!control.enabled) }}>
+          {control.enabled ? (chinese ? '关闭自动控制' : 'Disable control')
+            : (chinese ? '启用自动控制' : 'Enable control')}
+        </Button></div>
+      <p className="dt-hint">{control.bridgeReady
+        ? (chinese ? '原生桥已连接 · 审批仍由你处理' : 'Native bridge connected · approvals stay with you')
+        : (chinese ? '等待原生桥连接；队列不会发送到 Codex' : 'Waiting for native bridge; no Codex message is sent')}</p>
+      {!!control.intents.length && <ul className="dt-list dt-cards">{control.intents.slice(0, 5).map(intent =>
+        <li className="dt-row" key={intent.id}><div className="dt-row-main">
+          <strong>{intent.threadId}</strong>
+          <p className="dt-row-quote dt-clamp">{intent.reason}</p>
+          <div className="dt-row-meta"><span>{intent.status}</span><span>{timeText(intent.updatedAt, chinese)}</span></div>
+        </div></li>)}</ul>}
+    </section>}
 
     {!!monitor?.attentionTotal && <section>
       <h3>{chinese ? '需要你处理' : 'Needs your attention'} · {monitor.attentionTotal}</h3>

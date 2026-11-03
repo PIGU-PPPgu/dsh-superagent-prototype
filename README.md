@@ -34,6 +34,7 @@ Read the numbered documents in order; each builds only on the ones before it.
 - [009 Codex read-only experiment](docs/009-codex-read-only.md): observe an explicit allowlist of existing Codex threads through a Mac-side bridge
 - [010 Codex cloud validation](docs/010-codex-cloud-validation.md): a real cloud Codex CLI thread discovered and exported through the local GUI, with the model-network blocker recorded
 - [011 Codex monitor](docs/011-codex-monitor.md): locally stored Codex history, attention and optional automatic DSH Tickets
+- [012 Codex router](docs/012-codex-router.md): a global digest, priority queue and native Codex control bridge
 
 For a Mac-local history-only GUI, install dependencies and run `pnpm codex:local`; see [the Codex trial guide](docs/009-codex-read-only.md). The GUI needs no model API key and cannot determine live Codex Desktop status.
 

@@ -15,6 +15,8 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { CodexFileMonitor } from '../codex/file-bridge.ts'
 import { CodexMonitor, type CodexFailureCandidate } from './codex-monitor.ts'
+import { CodexRouter } from './codex-router.ts'
+import { CodexControl } from './codex-control.ts'
 import { registerGithubShellEnv } from './github-shell-env.ts'
 import { lockSync } from 'proper-lockfile'
 import { Engine, key, type EngineForSettings, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
@@ -89,6 +91,8 @@ export class Runtime extends Service implements SourceHost {
   private readonly toolHost: MainToolsHost & ExecutorToolsHost
   private readonly codexPanel?: CodexFileMonitor
   private readonly codexMonitor: CodexMonitor
+  readonly codexRouter: CodexRouter
+  readonly codexControl: CodexControl
   /** Non-zero while a main-Session tool is executing an Engine command, suppressing self-triggered domain event notices. */
   private quiet = 0
   private readonly authorizedCodexHandoffs = new Set<string>()
@@ -104,8 +108,14 @@ export class Runtime extends Service implements SourceHost {
     try {
       const report = (error: unknown) => { ctx.logger.warn('dsh-superagent: %s', String(error)) }
       const store = opened = this.store = new Store(join(machine.stateDir, 'orchestrator.sqlite'), report)
+      this.codexControl = new CodexControl({ store, stateDir: machine.stateDir })
       this.codexMonitor = new CodexMonitor({ store, context: ctx,
-        autoHandoff: (candidate, signal) => this.acceptCodexFailure(candidate, signal) })
+        autoHandoff: (candidate, signal) => this.acceptCodexFailure(candidate, signal),
+        autoRoute: (candidate, signal) => this.routeCodexFailure(candidate, signal),
+        onScan: () => { try { this.codexControl.sync(); this.codexRouter.refresh() }
+          catch (error) { ctx.logger.warn('dsh-superagent Codex Router refresh failed: %s', String(error)) } } })
+      this.codexRouter = new CodexRouter({ store, monitor: this.codexMonitor,
+        relay: (id, text) => this.sessions.relay(id, text) })
       const setup = this.setup = new Setup({ context: ctx, machine, lifetime: this.lifetime, restart })
       const deployed = () => setup.configured()
         ? environmentOf({ deployment: setup.deployment, sources: this.sources, settings: store.settings() }) : undefined
@@ -195,6 +205,7 @@ export class Runtime extends Service implements SourceHost {
         get deployment() { return setup.deployment }, configured: () => setup.configured(),
         get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem }, receive: trigger => passes.receive(trigger) }
       this.toolHost = { context: ctx, engine, store, prompts, sessions, settings: this.settings, assessor, resources,
+        codexMonitor: this.codexMonitor, codexControl: this.codexControl,
         ...(codex ? { codex } : {}),
         get github() { return runtime.context({ kind: 'github', health: ['github'] }) },
         requestPass: () => { passes.request() }, sendReplies: () => outbox.sent(),
@@ -234,6 +245,42 @@ export class Runtime extends Service implements SourceHost {
     return ticketEnvironment({ deployment: selected ? { ...deployment, ...selected } : deployment,
       sources, settings: this.store.settings(), ticket, ...trigger ? { trigger } : {} })
   }
+  /** When the native bridge is enabled, route a new issue back to its existing Codex conversation. */
+  private async routeCodexFailure(candidate: CodexFailureCandidate, signal: AbortSignal): Promise<string | undefined> {
+    this.codexControl.sync()
+    const control = this.codexControl.view()
+    const head = this.codexMonitor.routeHead(candidate.threadId)
+    const pending = control.intents.find(intent => intent.threadId === candidate.threadId
+      && (intent.status === 'queued' || intent.status === 'dispatching'))
+    const owned = this.store.tickets.open().some(ticket => {
+      const origin = sourceTrigger(this, ticket)
+      return origin?.source === 'codex' && origin.meta.threadId === candidate.threadId
+    })
+    if (owned) {
+      if (pending?.status === 'dispatching') throw new Error('Codex control is already dispatching for this DSH Ticket')
+      return undefined
+    }
+    if (pending) {
+      if (pending.status === 'dispatching' || !head?.ready || head.needsYou) {
+        throw new Error('An earlier Codex route is dispatching or the conversation changed; retry later')
+      }
+      if (pending.basedOnItemId === head.lastItemId) return pending.id
+      this.codexControl.cancel(pending.id)
+    }
+    if (!control.enabled || !control.bridgeReady) return undefined
+    signal.throwIfAborted()
+    if (!head?.present || head.archived || !head.ready || !head.lastItemId || head.needsYou) {
+      throw new Error('Codex Router cannot safely queue this conversation head')
+    }
+    const message = `Superagent router found a new issue in this conversation's stored history: ${JSON.stringify(candidate.summary.slice(0, 120))}. `
+      + `Assistant evidence: ${JSON.stringify(candidate.evidence.slice(0, 80))}. `
+      + 'Check this conversation\'s latest user request and live state before acting. Continue only authorized work here. '
+      + 'Ask the user for approvals or decisions; never change approval settings.'
+    return this.codexControl.enqueue({ threadId: candidate.threadId, basedOnItemId: head.lastItemId,
+      text: message, reason: `${candidate.stage ?? 'failed'}: ${candidate.summary.slice(0, 120)}`,
+      priority: candidate.stage === 'failed' ? 3 : 2, source: 'router' }).id
+  }
+
   /** Accept only new, assistant-evidenced failures or technical blockers in a separate DSH ticket. */
   private async acceptCodexFailure(candidate: CodexFailureCandidate, signal: AbortSignal): Promise<string> {
     signal.throwIfAborted()
@@ -334,6 +381,8 @@ export class Runtime extends Service implements SourceHost {
     return { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks,
       ...(this.codexPanel ? { codex: this.codexPanel } : {}),
       codexMonitor: this.codexMonitor,
+      codexRouter: this.codexRouter,
+      codexControl: this.codexControl,
       get deployment() { return setup.deployment },
       get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem },
       configured: () => setup.configured(), links: () => runtime.links(), ticketEnvironment: ticket => runtime.ticketEnvironment(ticket),

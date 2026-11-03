@@ -329,6 +329,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/codex/index.ts` | Public read-only Codex adapter exports |
 | `src/app/runtime.ts` | The Runtime, the composition root, with its start and stop |
 | `src/app/codex-monitor.ts` | Automatic Codex history scan, model triage, private persistence, panel attention and separately enabled failure handoff |
+| `src/app/codex-router.ts` | Bounded global Codex digest, meaningful-change audit and delivery to the DSH main Session |
+| `src/app/codex-control.ts` | Durable Codex follow-up queue and native bridge receipts, without direct Desktop RPC access |
 | `src/app/setup.ts` | Setup, and `setupChanged`, whether a save changes a field setup reads |
 | `src/app/passes.ts` | Passes, the pass scheduler |
 | `src/app/outbox.ts` | The Outbox: the Engine's `Outbox` port, the receipts and the `reply` effects that send them |
@@ -432,6 +434,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/codex-local-inventory.spec.ts` | Filesystem and SQLite inventory, source normalization and path boundaries |
 | `tests/codex-triage.spec.ts` | Bounded untrusted model input and strict attention output |
 | `tests/codex-monitor.spec.ts` | Baseline, changed-message triage, acknowledgement, restart, failed-read retry and opt-in failure handoff |
+| `tests/codex-router.spec.ts` | Global digest persistence and meaningful-change routing |
+| `tests/codex-control.spec.ts` | Codex control queue ordering, persistence and uncertain-send deduplication |
 | `tests/codex-workspace.spec.ts` | Isolated Codex analysis and repository-bound execution workspaces, plus panel-only reporting |
 | `tests/commands.spec.ts` | CLI calls as the deployment's accounts, the Channels' answers, and repository-scoped GitHub calls |
 | `tests/github-binding.spec.ts` | GitHub binding isolation for commands, cursors, threads and tickets |

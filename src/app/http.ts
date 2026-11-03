@@ -5,6 +5,8 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { z } from 'zod'
 import type { CodexObservation } from '../codex/model.ts'
 import type { CodexMonitor } from './codex-monitor.ts'
+import type { CodexRouter } from './codex-router.ts'
+import type { CodexControl } from './codex-control.ts'
 import { THREAD_FILTERS, TICKET_FILTERS, type Api, type ApiResponse, type RouteParams } from './api.ts'
 import { sourceSkills } from './context.ts'
 import type { ModelCatalog } from '@deepseek-ai/dsh-api-session-controller/types'
@@ -33,6 +35,8 @@ import { executorLoad, ticketDetail, ticketList } from './views/tickets.ts'
 export interface HttpHost {
   readonly codex?: { refresh(signal: AbortSignal): Promise<CodexObservation> }
   readonly codexMonitor: Pick<CodexMonitor, 'view' | 'setEnabled' | 'setAutoHandoff' | 'acknowledge'>
+  readonly codexRouter: Pick<CodexRouter, 'view'>
+  readonly codexControl: Pick<CodexControl, 'view' | 'setEnabled' | 'reorder' | 'cancel'>
   readonly store: Store
   /** Feishu message links resolved since startup, used by search to match AppLink URLs. */
   readonly sourceLinks: Pick<TextCache, 'entries'>
@@ -163,13 +167,20 @@ function routes(runtime: HttpHost): Routes {
     'GET codex': async ({ query }) => {
       const monitor = runtime.codexMonitor.view(offset.parse(query.offset), limit(20, 100).parse(query.limit),
         z.enum(['recent', 'all']).catch('recent').parse(query.scope))
-      return monitor.enabled || !runtime.codex ? { configured: !!runtime.codex, monitor }
-        : { configured: true, monitor, observation: await runtime.codex.refresh(new AbortController().signal) }
+      const router = runtime.codexRouter.view()
+      const control = runtime.codexControl.view()
+      return monitor.enabled || !runtime.codex ? { configured: !!runtime.codex, monitor, router, control }
+        : { configured: true, monitor, router, control, observation: await runtime.codex.refresh(new AbortController().signal) }
     },
     'POST codex/monitor': async ({ body }) =>
       runtime.codexMonitor.setEnabled(z.object({ enabled: z.boolean() }).strict().parse(await body()).enabled),
     'POST codex/auto-handoff': async ({ body }) =>
       runtime.codexMonitor.setAutoHandoff(z.object({ enabled: z.boolean() }).strict().parse(await body()).enabled),
+    'POST codex/control': async ({ body }) =>
+      runtime.codexControl.setEnabled(z.object({ enabled: z.boolean() }).strict().parse(await body()).enabled),
+    'POST codex/control/:id/reorder': async ({ params, body }) =>
+      runtime.codexControl.reorder(params.id, z.object({ priority: z.number().int().min(0).max(3) }).strict().parse(await body()).priority),
+    'POST codex/control/:id/cancel': async ({ params }) => runtime.codexControl.cancel(params.id),
     'POST codex/attention/:id/ack': async ({ params, body }) => {
       const seen = z.object({ itemId: z.string().min(1).max(200), at: z.iso.datetime({ offset: true }) }).strict()
         .parse(await body())

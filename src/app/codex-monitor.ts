@@ -46,7 +46,7 @@ interface StoredThread extends MonitoredCodexThread {
   autoHandoffBaselineItemId?: string
   autoHandoffFreshItemId?: string
   autoHandoffReadComplete?: boolean
-  autoHandoff?: { itemId: string; at: string; ticketId?: string; error?: string }
+  autoHandoff?: { itemId: string; at: string; ticketId?: string; intentId?: string; error?: string }
   handoffs?: HandoffRecord[]
   error?: string
 }
@@ -83,6 +83,7 @@ export interface CodexMonitorThreadView {
   latestTurnStatus?: string
   present: boolean
   stage?: CodexTriageStage
+  assessmentItemId?: string
   summary?: string
   childCount?: number
   childErrors?: number
@@ -91,6 +92,7 @@ export interface CodexMonitorThreadView {
   error?: string
   attention?: Attention
   handoffTicketId?: string
+  routeIntentId?: string
   handoffStage?: TicketStage
   handoffError?: string
 }
@@ -119,6 +121,18 @@ export interface CodexMonitorView {
   threads: CodexMonitorThreadView[]
   nextOffset?: number
 }
+export interface CodexRouteHead {
+  threadId: string
+  lastItemId?: string
+  title: string
+  summary?: string
+  stage?: CodexTriageStage
+  updatedAt?: string
+  present: boolean
+  archived: boolean
+  needsYou: boolean
+  ready: boolean
+}
 type ReadRpc = Pick<CodexStdioReadRpc, 'request' | 'close'>
 export interface CodexFailureCandidate {
   threadId: string
@@ -140,6 +154,8 @@ export interface CodexMonitorDeps {
   pollMs?: number
   now?: () => Date
   autoHandoff?: (candidate: CodexFailureCandidate, signal: AbortSignal) => Promise<string>
+  autoRoute?: (candidate: CodexFailureCandidate, signal: AbortSignal) => Promise<string | undefined>
+  onScan?: () => void
 }
 
 const initial = (): StoredMonitor => ({ version: 1, enabled: false, initialized: false, threads: {} })
@@ -227,6 +243,20 @@ export class CodexMonitor {
   private state(): StoredMonitor { return this.deps.store.get(MonitorKey) ?? initial() }
   private save(value: StoredMonitor): void { this.deps.store.set(MonitorKey, value) }
 
+  /** Only a known main conversation may receive a router intent; the item ID is a stale-work guard. */
+  routeHead(threadId: string): CodexRouteHead | undefined {
+    const row = this.state().threads[threadId]
+    if (!row || !isMain(row)) return undefined
+    return { threadId, title: row.name ?? threadId, present: row.present, archived: row.archived,
+      ready: !!row.baselined && !row.error && !!row.lastItemId,
+      ...(row.lastItemId ? { lastItemId: row.lastItemId } : {}),
+      ...(row.updatedAt ? { updatedAt: row.updatedAt } : {}),
+      ...(row.assessment?.decision.summary ? { summary: row.assessment.decision.summary } : {}),
+      ...(row.assessment?.decision.stage ? { stage: row.assessment.decision.stage } : {}),
+      ...(row.assessment?.itemId ? { assessmentItemId: row.assessment.itemId } : {}),
+      needsYou: row.assessment?.decision.stage === 'needsYou' || row.userDecisionRequested === true }
+  }
+
   view(offset = 0, limit = 50, scope: 'recent' | 'all' = 'recent'): CodexMonitorView {
     const state = this.state()
     const present = Object.values(state.threads).filter(row => row.present)
@@ -254,13 +284,15 @@ export class CodexMonitor {
       ...(row.error ? { error: row.error } : {}),
       ...(row.attention ? { attention: row.attention } : {}),
       ...(row.autoHandoff?.ticketId ? { handoffTicketId: row.autoHandoff.ticketId } : {}),
+      ...(row.autoHandoff?.intentId ? { routeIntentId: row.autoHandoff.intentId } : {}),
       ...(row.autoHandoff?.ticketId && this.deps.store.tickets.get(row.autoHandoff.ticketId)
         ? { handoffStage: ticketStage(this.deps.store.tickets.get(row.autoHandoff.ticketId)!) } : {}),
       ...(row.autoHandoff?.error ? { handoffError: row.autoHandoff.error } : {}),
     })
     const attention = roots.filter(row => !row.archived && row.attention?.decision.needsAttention
       && !row.attention.acknowledgedAt
-      && !(row.autoHandoff?.ticketId && row.autoHandoff.itemId === row.attention.itemId
+      && !((row.autoHandoff?.ticketId || row.autoHandoff?.intentId)
+        && row.autoHandoff.itemId === row.attention.itemId
         && row.attention.decision.stage !== 'needsYou'))
     const managed = roots.flatMap(row => {
       const history = row.handoffs ?? (row.autoHandoff?.ticketId ? [row.autoHandoff as HandoffRecord] : [])
@@ -574,6 +606,7 @@ export class CodexMonitor {
       this.save({ ...latest, threads: nextThreads, initialized: true, scannedAt: seenAt,
         ...(inventoryError ? { error: inventoryError } : { error: undefined }) })
       await this.processAutoHandoffs(signal)
+      this.deps.onScan?.()
     } finally { rpc.close() }
   }
 
@@ -595,18 +628,25 @@ export class CodexMonitor {
         || row.autoHandoffBaselineItemId === assessment.itemId
         || (row.autoHandoffBaselineItemId === undefined || row.autoHandoffBaselineItemId === '')
           && (!row.updatedAt || Date.parse(row.updatedAt) <= Date.parse(state.autoHandoffEnabledAt))
-        || previous?.itemId === assessment.itemId && (previous.ticketId
+        || previous?.itemId === assessment.itemId && (previous.ticketId || previous.intentId
           || previous.error && Date.parse(this.now().toISOString()) - Date.parse(previous.at) < RESCAN_MS)) continue
       signal.throwIfAborted()
       const at = this.now().toISOString()
       try {
-        const ticketId = await handler({ threadId, itemId: assessment.itemId, title: row.name ?? threadId,
+        const candidate = { threadId, itemId: assessment.itemId, title: row.name ?? threadId,
           summary: assessment.decision.summary ?? 'Codex reported a failure',
           evidence: assessment.decision.evidence,
           stage: assessment.decision.stage,
           ...(row.context.at(-1)?.turnId ? { turnId: row.context.at(-1)?.turnId } : {}),
           ...(row.repository ? { repository: row.repository } : {}),
-          messages: row.context.map(({ role, text }) => ({ role, text })) }, signal)
+          messages: row.context.map(({ role, text }) => ({ role, text })) } satisfies CodexFailureCandidate
+        const intentId = await this.deps.autoRoute?.(candidate, signal)
+        if (intentId) {
+          const current = this.state().threads[threadId] ?? row
+          this.commitThread(threadId, { ...current, autoHandoff: { itemId: assessment.itemId, at, intentId } })
+          continue
+        }
+        const ticketId = await handler(candidate, signal)
         const current = this.state().threads[threadId] ?? row
         const history = current.handoffs ?? (current.autoHandoff?.ticketId ? [current.autoHandoff as HandoffRecord] : [])
         this.commitThread(threadId, { ...current, autoHandoff: { itemId: assessment.itemId, at, ticketId },

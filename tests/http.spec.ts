@@ -14,8 +14,13 @@ function serve(runtime: Partial<Record<keyof HttpHost, unknown>>, host = '127.0.
   let handler: Handler = async () => {}
   const ctx = { webServer: { host, port: 3082, register: (route: { handler: Handler }) => { handler = route.handler; return () => {} } } }
   const emptyMonitor = { enabled: false, total: 0, attentionTotal: 0, attention: [], threads: [] }
+  const emptyRouter = { mainTotal: 0, recentTotal: 0, childTotal: 0, childChecked: 0,
+    needsYou: 0, technical: 0, managed: 0, priorities: [], recent: [] }
+  const emptyControl = { enabled: false, bridgeReady: false, intents: [] }
   registerHttp(ctx as never, { ready: Promise.resolve(),
     codexMonitor: { view: () => emptyMonitor, setEnabled: () => emptyMonitor, acknowledge: () => emptyMonitor },
+    codexRouter: { view: () => emptyRouter },
+    codexControl: { view: () => emptyControl },
     ...runtime } as unknown as HttpHost)
   return async (method: string, path: string, body?: unknown, headers: Headers = {}) => {
     let status = 0, text = ''
@@ -87,6 +92,9 @@ it('shows Codex observations through a read-only panel route when the bridge is 
   const withoutBridge = serve({})
   expect(await withoutBridge('GET', 'codex')).toEqual({ status: 200, body: {
     configured: false, monitor: { enabled: false, total: 0, attentionTotal: 0, attention: [], threads: [] },
+    router: { mainTotal: 0, recentTotal: 0, childTotal: 0, childChecked: 0,
+      needsYou: 0, technical: 0, managed: 0, priorities: [], recent: [] },
+    control: { enabled: false, bridgeReady: false, intents: [] },
   } })
   const signal = new AbortController().signal
   const refresh = async (received: AbortSignal) => {

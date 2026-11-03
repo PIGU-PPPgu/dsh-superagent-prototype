@@ -25,6 +25,7 @@
     "cordis.patch.yml",
     "locale/*.json",
     "README.md",
+    "scripts/codex-control-bridge.mjs",
     "prompts",
     "skills"
   ],

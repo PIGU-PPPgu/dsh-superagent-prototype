@@ -278,6 +278,58 @@ it('accepts a Codex failure once, routes later evidence to its ticket, and isola
   expect(relays(runtime.masterId)).toEqual([])
 })
 
+it('lets the DSH Router queue a stale-guarded Codex follow-up without answering approvals', async () => {
+  const state = { version: 1, enabled: true, initialized: true, threads: { 'thread-router': {
+    id: 'thread-router', name: 'Build task', sourceKind: 'vscode', archived: false, present: true,
+    baselined: true, seenAt: '2026-11-03T05:00:00Z', lastItemId: 'item-head', context: [],
+    assessment: { version: 4, at: '2026-11-03T05:00:00Z', itemId: 'item-head',
+      decision: { needsAttention: false, kind: 'none', stage: 'progress', summary: 'Build is continuing',
+        reason: 'Routine progress', action: 'No action' } },
+  } } }
+  runtime.store.set('codex-monitor-v1', state)
+  runtime.codexControl.setEnabled(true)
+  const head = await runTool(runtime.masterId, 'orchestrator_codex_route', { operation: 'head', thread_id: 'thread-router' })
+  expect(head.head).toMatchObject({ lastItemId: 'item-head', ready: true, needsYou: false })
+  await expect(runTool(runtime.masterId, 'orchestrator_codex_route', { operation: 'followup', thread_id: 'thread-router',
+    base_item_id: 'old-item', reason: 'Continue the build' })).rejects.toThrow('changed')
+  const queued = await runTool(runtime.masterId, 'orchestrator_codex_route', { operation: 'followup', thread_id: 'thread-router',
+    base_item_id: 'item-head', reason: 'Continue the build', priority: 2 })
+  expect(queued.intent).toMatchObject({ status: 'queued', priority: 2, threadId: 'thread-router' })
+  expect(runtime.codexControl.view().intents).toHaveLength(1)
+  const internal = runtime as unknown as { routeCodexFailure(candidate: { threadId: string; itemId: string; title: string;
+    summary: string; evidence: string; messages: { role: 'assistant'; text: string }[] }, signal: AbortSignal): Promise<string | undefined> }
+  expect(await internal.routeCodexFailure({ threadId: 'thread-router', itemId: 'item-head', title: 'Build task',
+    summary: 'Build failed', evidence: 'Build failed', messages: [{ role: 'assistant', text: 'Build failed' }] },
+  new AbortController().signal)).toBe((queued.intent as { id: string }).id)
+  expect(runtime.store.tickets.list()).toEqual([])
+  runtime.store.set('codex-monitor-v1', { ...state, threads: { 'thread-router': { ...state.threads['thread-router'],
+    userDecisionRequested: true,
+    attention: { itemId: 'item-head', at: '2026-11-03T05:01:00Z',
+      decision: { needsAttention: true, kind: 'approval', stage: 'needsYou', reason: 'Approval needed',
+        action: 'Approve the install', evidence: 'Please approve' } } } } })
+  await expect(runTool(runtime.masterId, 'orchestrator_codex_route', { operation: 'followup', thread_id: 'thread-router',
+    base_item_id: 'item-head', reason: 'Continue the build' })).rejects.toThrow('needs a person')
+})
+
+it('keeps a Codex conversation with an active DSH Ticket out of the native route queue', async () => {
+  const candidate = { threadId: 'thread-owned', itemId: 'assistant-owned', title: 'Build failed',
+    summary: 'Build failed', evidence: 'Build failed', repository: 'acme/widgets',
+    messages: [{ role: 'assistant' as const, text: 'Build failed' }] }
+  const internal = runtime as unknown as {
+    acceptCodexFailure(value: typeof candidate, signal: AbortSignal): Promise<string>
+    routeCodexFailure(value: typeof candidate, signal: AbortSignal): Promise<string | undefined>
+  }
+  const ticketId = await internal.acceptCodexFailure(candidate, new AbortController().signal)
+  expect(runtime.store.tickets.get(ticketId)?.ended).toBeUndefined()
+  runtime.store.set('codex-monitor-v1', { version: 1, enabled: true, initialized: true, threads: {
+    [candidate.threadId]: { id: candidate.threadId, name: candidate.title, sourceKind: 'vscode', archived: false,
+      present: true, baselined: true, lastItemId: candidate.itemId, seenAt: '2026-11-03T05:00:00Z', context: [] },
+  } })
+  runtime.codexControl.setEnabled(true)
+  expect(await internal.routeCodexFailure(candidate, new AbortController().signal)).toBeUndefined()
+  expect(runtime.codexControl.view().intents).toEqual([])
+})
+
 it('fans a person\'s later thread message out to the live worker as context and tells the orchestrator, without an Eval', async () => {
   const { ticket, sessionId } = await acceptedTicket()
   deliveries.mockClear()

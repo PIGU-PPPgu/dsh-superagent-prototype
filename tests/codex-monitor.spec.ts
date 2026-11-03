@@ -48,6 +48,7 @@ function fixture() {
   let updatedAtOverride: number | undefined
   let localRows: MonitoredCodexThread[] = []
   let decisionText: string | undefined
+  let routeIntentId: string | undefined
   let finishKind = 'stop'
   let modelGate: Promise<void> | undefined
   const requests: string[] = []
@@ -101,8 +102,9 @@ function fixture() {
   const connect = vi.fn(async () => rpc as unknown as Awaited<ReturnType<NonNullable<CodexMonitorDeps['connect']>>>)
   const inventory = vi.fn(async () => localRows)
   const autoHandoff = vi.fn(async (_candidate: CodexFailureCandidate) => 'ticket-codex')
-  const monitor = new CodexMonitor({ store, context, connect, inventory, now: () => now, autoHandoff })
-  return { store, monitor, rpc, stream, inventory, autoHandoff, requests, setPhase: (value: number) => { phase = value },
+  const autoRoute = vi.fn(async (_candidate: CodexFailureCandidate) => routeIntentId)
+  const monitor = new CodexMonitor({ store, context, connect, inventory, now: () => now, autoHandoff, autoRoute })
+  return { store, monitor, rpc, stream, inventory, autoHandoff, autoRoute, requests, setPhase: (value: number) => { phase = value },
     setFailRead: (value: boolean) => { failRead = value },
     setMissingAnchor: (value: boolean) => { missingAnchor = value },
     setLongHistory: (value: boolean) => { longHistory = value },
@@ -121,6 +123,7 @@ function fixture() {
     setUpdatedAt: (value: string) => { updatedAtOverride = Date.parse(value) / 1000 },
     setLocalRows: (rows: MonitoredCodexThread[]) => { localRows = rows },
     setDecision: (value: string) => { decisionText = value },
+    setRouteIntent: (value: string | undefined) => { routeIntentId = value },
     setFinishKind: (value: string) => { finishKind = value },
     holdModel: () => {
       let release!: () => void
@@ -147,6 +150,25 @@ it('automatically hands off only a new assistant-evidenced failure, once per ite
   expect(monitor.view().threads[0]?.handoffTicketId).toBe('ticket-codex')
   await monitor.scanOnce()
   expect(autoHandoff).toHaveBeenCalledTimes(1)
+})
+
+it('routes an evidenced new failure to its existing Codex conversation when native control is enabled', async () => {
+  const { monitor, autoHandoff, autoRoute, setRouteIntent, setDecision, setPhase, advanceMinutes } = fixture()
+  monitor.setEnabled(true)
+  await monitor.scanOnce()
+  monitor.setAutoHandoff(true)
+  setRouteIntent('intent-codex')
+  advanceMinutes(1)
+  setDecision(JSON.stringify({ needsAttention: true, stage: 'failed', kind: 'failure',
+    reason: '构建失败', action: '检查构建', summary: '构建失败', evidence: '请检查发布结果' }))
+  setPhase(1)
+  await monitor.scanOnce()
+  expect(autoRoute).toHaveBeenCalledTimes(1)
+  expect(autoHandoff).not.toHaveBeenCalled()
+  expect(monitor.view().threads[0]?.routeIntentId).toBe('intent-codex')
+  expect(monitor.view().attentionTotal).toBe(0)
+  await monitor.scanOnce()
+  expect(autoRoute).toHaveBeenCalledTimes(1)
 })
 
 it('keeps the assistant item as the handoff evidence when a tool item follows it', async () => {
@@ -342,6 +364,7 @@ it('summarizes existing conversations and alerts on later assistant action', asy
   const firstAttention = monitor.view().attention[0]!.attention!
   monitor.acknowledge('thread-a', firstAttention.itemId, firstAttention.at)
   expect(monitor.view().attentionTotal).toBe(0)
+  expect(monitor.routeHead('thread-a')?.needsYou).toBe(true)
   const restarted = new CodexMonitor({ store, context: { llm: { stream }, sessionController: {
     modelCatalog: async () => ({ default: { provider: 'magpie', model: 'test-model' } }),
   } } as unknown as CodexMonitorDeps['context'], connect: async () => rpc as unknown as

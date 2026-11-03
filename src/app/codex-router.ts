@@ -1,0 +1,87 @@
+/** Global, bounded digest of persisted Codex conversations for the DSH Router and panel. */
+import { key } from '../core/index.ts'
+import { record } from '../kv.ts'
+import type { CodexMonitor, CodexMonitorThreadView } from './codex-monitor.ts'
+import type { Store } from './store.ts'
+
+export interface CodexRouterPriority {
+  threadId: string
+  title: string
+  summary: string
+  kind: 'needsYou' | 'technical' | 'ticketNeedsYou' | 'childFailure'
+  ticketId?: string
+}
+export interface CodexRouterBrief {
+  asOf?: string
+  mainTotal: number
+  recentTotal: number
+  childTotal: number
+  childChecked: number
+  needsYou: number
+  technical: number
+  managed: number
+  priorities: CodexRouterPriority[]
+  recent: { threadId: string; title: string; summary: string; stage?: string }[]
+}
+interface StoredBrief { fingerprint: string; value: CodexRouterBrief }
+const BriefKey = record<StoredBrief>('codex-router-brief-v1')
+
+const compact = (text: string | undefined, limit = 140): string => (text ?? '').replace(/\s+/g, ' ').trim().slice(0, limit)
+const item = (row: CodexMonitorThreadView, kind: CodexRouterPriority['kind']): CodexRouterPriority => ({
+  threadId: row.id, title: compact(row.title, 100), summary: compact(
+    kind === 'needsYou' || kind === 'technical' ? row.attention?.decision.action ?? row.attention?.decision.reason
+      : kind === 'childFailure' ? `${row.childErrors} child turn(s) have a stored failed status`
+        : row.summary), kind,
+  ...(row.handoffTicketId ? { ticketId: row.handoffTicketId } : {}),
+})
+
+/** The source remains a history snapshot; this Router never infers Desktop runtime state from it. */
+export class CodexRouter {
+  constructor(private readonly deps: { store: Pick<Store, 'get' | 'set' | 'atomic'>;
+    monitor: Pick<CodexMonitor, 'view'>; relay?: (id: string, text: string) => void }) {}
+
+  view(): CodexRouterBrief { return this.deps.store.get(BriefKey)?.value ?? {
+    mainTotal: 0, recentTotal: 0, childTotal: 0, childChecked: 0, needsYou: 0, technical: 0,
+    managed: 0, priorities: [], recent: [] } }
+
+  /** Save one report only when conversation meaning changes, and deliver it to the DSH main Session. */
+  refresh(): CodexRouterBrief {
+    const monitor = this.deps.monitor.view(0, 1000, 'recent')
+    const human = monitor.attention.filter(row => row.attention?.decision.stage === 'needsYou')
+    const technicalFacts = monitor.threads.filter(row => row.stage === 'failed' || row.stage === 'blocked')
+    const technical = monitor.attention.filter(row => row.attention?.decision.stage === 'failed'
+      || row.attention?.decision.stage === 'blocked')
+    const priorities = [
+      ...human.map(row => item(row, 'needsYou')),
+      ...monitor.managed.filter(row => row.handoffStage?.stage === 'person').map(row => item(row, 'ticketNeedsYou')),
+      ...technical.map(row => ({ ...item(row, 'technical'), summary: compact(row.summary) })),
+      ...monitor.threads.filter(row => (row.childErrors ?? 0) > 0 && row.stage !== 'reportedComplete')
+        .map(row => item(row, 'childFailure')),
+    ].slice(0, 12)
+    const recent = monitor.threads.filter(row => row.summary).slice(0, 5)
+      .map(row => ({ threadId: row.id, title: compact(row.title, 100), summary: compact(row.summary),
+        ...(row.stage ? { stage: row.stage } : {}) }))
+    const value: CodexRouterBrief = { ...(monitor.scannedAt ? { asOf: monitor.scannedAt } : {}),
+      mainTotal: monitor.total, recentTotal: monitor.recentTotal ?? 0,
+      childTotal: monitor.childTotal ?? 0, childChecked: monitor.checkedRecentChildTotal ?? 0,
+      needsYou: human.length, technical: technical.length,
+      managed: monitor.managedTotal, priorities, recent }
+    const fingerprint = key('codex-router-brief', JSON.stringify({
+      attention: human.map(row => [row.id, row.attention?.itemId]),
+      technical: technicalFacts.map(row => [row.id, row.assessmentItemId, row.stage]),
+      managed: monitor.managed.filter(row => row.handoffStage?.stage === 'person')
+        .map(row => [row.handoffTicketId, row.handoffStage?.stage,
+        row.handoffStage && 'action' in row.handoffStage ? row.handoffStage.action : undefined]),
+      childFailure: monitor.threads.filter(row => (row.childErrors ?? 0) > 0 && row.stage !== 'reportedComplete')
+        .map(row => [row.id, row.childErrors]),
+    }))
+    const previous = this.deps.store.get(BriefKey)
+    this.deps.store.atomic(() => {
+      this.deps.store.set(BriefKey, { fingerprint, value })
+      if (previous?.fingerprint !== fingerprint && this.deps.relay) this.deps.relay(`codex-router:${fingerprint}`,
+        JSON.stringify({ kind: 'codex_supervisor_digest', ...value,
+          source: 'persisted Codex history', instruction: 'Prioritize these conversations; do not approve requests or assume live Desktop status.' }))
+    })
+    return value
+  }
+}

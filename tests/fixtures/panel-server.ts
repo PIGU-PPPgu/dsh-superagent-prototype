@@ -87,6 +87,8 @@ export const MACHINE = { stateDir: '/srv/dsh-superagent', promptMaxChars: 100000
 type Settings = ReturnType<typeof SettingsSchema.parse>
 export interface PanelServer {
   codex: CodexMonitorView
+  codexRouter: ApiResponse<'GET codex'>['router']
+  codexControl: ApiResponse<'GET codex'>['control']
   joined?: Record<string, string>; joining?: Record<string, string>
   joinError?: string
   settings: Settings; revisions: Record<string, number>
@@ -264,6 +266,9 @@ function initial(): PanelServer {
   const defaults = { revision: 0, previousRevision: null, savedAt: '', source: 'defaults' }
   return {
     codex: { enabled: false, total: 0, attentionTotal: 0, attention: [], managedTotal: 0, managed: [], threads: [] },
+    codexRouter: { mainTotal: 0, recentTotal: 0, childTotal: 0, childChecked: 0,
+      needsYou: 0, technical: 0, managed: 0, priorities: [], recent: [] },
+    codexControl: { enabled: false, bridgeReady: false, intents: [] },
     health: {}, down: false, pending: 0, opened: [], requests: [], misuse: [], queued: new Set(), dropped: [], failing: [],
     setup: { machine: MACHINE, problem: null, feishuProblem: null,
       accounts: { repository: 'acme/widgets', agent: 'agent-bot', bindings: [], feishu: { appId: 'cli_bot', brand: 'feishu', botId: 'ou_bot',
@@ -308,7 +313,8 @@ const ticketOf = (id: string) =>
 const SourceSave = z.object({ enabled: z.boolean(), config: z.unknown() })
 
 const ROUTES: { [K in keyof Api]: Route<K> } = {
-  'GET codex': { query: ['offset', 'limit', 'scope'], answer: () => ({ configured: false, monitor: server.codex }) },
+  'GET codex': { query: ['offset', 'limit', 'scope'], answer: () => ({ configured: false, monitor: server.codex,
+    router: server.codexRouter, control: server.codexControl }) },
   'POST codex/monitor': { body: true, answer: ({ body }) => {
     server.codex = { ...server.codex, enabled: body.enabled }
     return server.codex
@@ -316,6 +322,24 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
   'POST codex/auto-handoff': { body: true, answer: ({ body }) => {
     server.codex = { ...server.codex, autoHandoffEnabled: body.enabled }
     return server.codex
+  } },
+  'POST codex/control': { body: true, answer: ({ body }) => {
+    server.codexControl = { ...server.codexControl, enabled: body.enabled }
+    return server.codexControl
+  } },
+  'POST codex/control/:id/reorder': { body: true, answer: ({ params, body }) => {
+    const intent = server.codexControl.intents.find(intent => intent.id === params.id)!
+    const updated = { ...intent, priority: body.priority }
+    server.codexControl = { ...server.codexControl, intents: server.codexControl.intents.map(item =>
+      item.id === params.id ? updated : item) }
+    return updated
+  } },
+  'POST codex/control/:id/cancel': { answer: ({ params }) => {
+    const intent = server.codexControl.intents.find(intent => intent.id === params.id)!
+    const updated = { ...intent, status: 'cancelled' as const }
+    server.codexControl = { ...server.codexControl, intents: server.codexControl.intents.map(item =>
+      item.id === params.id ? updated : item) }
+    return updated
   } },
   'POST codex/attention/:id/ack': { body: true, answer: ({ params, body }) => {
     const matches = (row: CodexMonitorView['attention'][number]) => row.id === params.id

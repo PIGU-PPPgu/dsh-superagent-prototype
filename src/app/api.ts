@@ -2,6 +2,8 @@
 import type { ModelCatalog } from '@deepseek-ai/dsh-api-session-controller/types'
 import type { CodexObservation } from '../codex/model.ts'
 import type { CodexMonitorView } from './codex-monitor.ts'
+import type { CodexRouterBrief } from './codex-router.ts'
+import type { CodexControlView, CodexControlIntent } from './codex-control.ts'
 import type { PromptConfig, Prompts } from './prompts.ts'
 import type { PromptsView, StateView, TicketPageView } from './http.ts'
 import type { HistoryView } from './settings-history.ts'
@@ -21,9 +23,13 @@ type Delivery = 'injected' | 'pending'
 
 export interface Api {
   'GET codex': { query?: Paged & { scope?: 'recent' | 'all' };
-    response: { configured: boolean; observation?: CodexObservation; monitor: CodexMonitorView } }
+    response: { configured: boolean; observation?: CodexObservation; monitor: CodexMonitorView;
+      router: CodexRouterBrief; control: CodexControlView } }
   'POST codex/monitor': { body: { enabled: boolean }; response: CodexMonitorView }
   'POST codex/auto-handoff': { body: { enabled: boolean }; response: CodexMonitorView }
+  'POST codex/control': { body: { enabled: boolean }; response: CodexControlView }
+  'POST codex/control/:id/reorder': { body: { priority: number }; response: CodexControlIntent }
+  'POST codex/control/:id/cancel': { response: CodexControlIntent }
   'POST codex/attention/:id/ack': { body: { itemId: string; at: string }; response: CodexMonitorView }
   'GET state': { response: StateView }
   'GET overview': { response: OverviewView & { codexAttention?: number; codexManaged?: number;

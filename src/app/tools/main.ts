@@ -3,6 +3,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { z } from 'zod'
 import type { CodexObservation } from '../../codex/model.ts'
+import type { CodexMonitor } from '../codex-monitor.ts'
+import type { CodexControl } from '../codex-control.ts'
 import { UserError, followupOwners, key, reasonText, type Decision, type DecisionKind, type EngineForMainSession, type EngineForPeople }
   from '../../core/index.ts'
 import { IM_WORDS, NOTE_WORDS, wordCount } from '../../infra/text.ts'
@@ -29,6 +31,8 @@ export interface MainToolsHost {
   readonly resources: ResourceHost
   /** Optional, read-only view of allowlisted external Codex threads. */
   readonly codex?: { refresh(signal: AbortSignal): Promise<CodexObservation> }
+  readonly codexMonitor: Pick<CodexMonitor, 'routeHead'>
+  readonly codexControl: Pick<CodexControl, 'view' | 'enqueue' | 'reorder' | 'cancel'>
   /** Schedules a pass to carry out work queued by an Engine command (such as an Eval or ticket resume). */
   requestPass(): void
   sendReplies(): Promise<void>
@@ -154,6 +158,44 @@ function routeTool(host: MainToolsHost): Tool {
     },
   })
 }
+/** The DSH Router records Codex intents; only the native bridge can deliver them. */
+function codexRouteTool(host: MainToolsHost): Tool {
+  const need = (value: string | undefined, field: string): string => {
+    if (!value) throw new Error(`Codex route needs ${field}`)
+    return value
+  }
+  return tool({
+    name: 'orchestrator_codex_route',
+    description: 'Read Codex history; queue a verified follow-up; reorder or cancel queued work. No approvals or live-state assumptions.',
+    schema: z.object({ operation: z.enum(['head', 'followup', 'reorder', 'cancel']), thread_id: z.string().optional(),
+      base_item_id: z.string().optional(), intent_id: z.string().optional(), reason: z.string().trim().min(1).max(300).optional(),
+      priority: z.number().int().min(0).max(3).optional() }).strict(),
+    execute: async args => {
+      if (args.operation === 'head') return { head: host.codexMonitor.routeHead(need(args.thread_id, 'thread_id')) ?? null,
+        control: host.codexControl.view() }
+      if (args.operation === 'reorder') return { intent: host.codexControl.reorder(need(args.intent_id, 'intent_id'),
+        args.priority ?? 1) }
+      if (args.operation === 'cancel') return { intent: host.codexControl.cancel(need(args.intent_id, 'intent_id')) }
+      if (!host.codexControl.view().enabled) throw new Error('Codex native control bridge is not enabled')
+      const threadId = need(args.thread_id, 'thread_id'), itemId = need(args.base_item_id, 'base_item_id')
+      const head = host.codexMonitor.routeHead(threadId)
+      if (!head?.present || head.archived || !head.ready || head.lastItemId !== itemId) {
+        throw new Error('Codex conversation changed or its snapshot is unavailable; read the head again')
+      }
+      if (head.needsYou) throw new Error('This Codex conversation needs a person; router follow-up cannot answer it')
+      const openTicket = host.store.tickets.open().find(ticket => {
+        const source = host.store.triggers.get(ticket.origin.triggerId)
+        return source?.source === 'codex' && source.meta.threadId === threadId
+      })
+      if (openTicket) throw new Error('An active DSH Ticket already owns this Codex conversation')
+      const observed = head.summary ? `Historical summary: ${JSON.stringify(head.summary.slice(0, 120))}. ` : ''
+      const message = `Superagent router follow-up for this conversation. ${observed}Check the latest user request and current state before acting. Continue only work that remains authorized in this conversation. Ask the user for any approval or decision; do not change approval settings.`
+      const intent = host.codexControl.enqueue({ threadId, basedOnItemId: itemId, text: message,
+        reason: need(args.reason, 'reason'), priority: args.priority ?? 1, source: 'router' })
+      return { intent, bridgeReady: host.codexControl.view().bridgeReady }
+    },
+  })
+}
 /** Builds the main Session's tools; `agent` scopes prompt preview resources to that Session. */
 export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
   const resources: MainResourceHost = { ...host.resources, sessions: host.sessions, settings: host.settings }
@@ -166,6 +208,7 @@ export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
       schema: z.object({}).strict(),
       execute: async (_args, signal) => host.codex!.refresh(signal),
     })] : []),
+    codexRouteTool(host),
     routeTool(host),
     tool({
       name: 'orchestrator_ticket_retry',
