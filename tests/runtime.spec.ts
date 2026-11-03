@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi } from 'v
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import { Runtime } from '../src/app/runtime.ts'
+import type { CodexMonitor } from '../src/app/codex-monitor.ts'
 import { jobRegistry } from './fixtures/host.ts'
 import { evalsHealth } from '../src/app/views/overview.ts'
 import { mandateInstructions } from '../src/executor/dsh.ts'
@@ -304,6 +305,16 @@ it('lets the DSH Router queue a stale-guarded Codex follow-up without answering 
         action: 'Approve the install', evidence: 'Please approve' } } } } })
   await expect(runTool(runtime.masterId, 'orchestrator_codex_route', { operation: 'followup', thread_id: 'thread-router',
     base_item_id: 'item-head', reason: 'Continue the build' })).rejects.toThrow('needs a person')
+})
+
+it('lets the DSH main Session inspect bounded Codex history through its read-only tool', async () => {
+  const history = { threadId: 'thread-a', title: 'Build task', source: 'persisted Codex history' as const,
+    readAt: '2026-11-03T05:00:00Z', complete: true, messages: [{ id: 'message-a', turnId: 'turn-a',
+      role: 'assistant' as const, text: 'The build failed' }] }
+  const monitor = (runtime as unknown as { codexMonitor: CodexMonitor }).codexMonitor
+  const read = vi.spyOn(monitor, 'readHistory').mockResolvedValue(history)
+  expect(await runTool(runtime.masterId, 'orchestrator_codex_route', { operation: 'history', thread_id: 'thread-a', limit: 3 })).toEqual(history)
+  expect(read).toHaveBeenCalledWith('thread-a', 3, expect.any(AbortSignal))
 })
 
 it('keeps a Codex conversation with an active DSH Ticket out of the native route queue', async () => {

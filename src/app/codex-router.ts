@@ -81,7 +81,7 @@ export class CodexRouter {
       this.deps.store.set(BriefKey, { fingerprint, value })
       if (previous?.fingerprint !== fingerprint && this.deps.relay) this.deps.relay(`codex-router:${fingerprint}`,
         JSON.stringify({ kind: 'codex_supervisor_digest', ...value,
-          source: 'persisted Codex history', instruction: 'Prioritize these conversations; do not approve requests or assume live Desktop status.' }))
+          source: 'persisted Codex history', instruction: 'Prioritize decisions and results. Read selected messages with orchestrator_codex_route operation=history; never assume live Desktop status or approve requests.' }))
     })
     return value
   }

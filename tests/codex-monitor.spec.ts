@@ -54,7 +54,7 @@ function fixture() {
   let modelGate: Promise<void> | undefined
   const requests: string[] = []
   const rpc = {
-    request: vi.fn(async (method: string, params: Record<string, unknown>) => {
+    request: vi.fn(async (method: string, params: Record<string, unknown>, _signal?: AbortSignal): Promise<unknown> => {
       requests.push(method)
       if (method === 'thread/list') return { data: params.archived ? [] : [...(includeRpcRoot ? [{
         id: 'thread-a', name: 'Release task', source: subagent
@@ -106,7 +106,7 @@ function fixture() {
   const inventory = vi.fn(async () => localRows)
   const autoHandoff = vi.fn(async (_candidate: CodexFailureCandidate) => 'ticket-codex')
   const monitor = new CodexMonitor({ store, context, connect, inventory, now: () => now, autoHandoff })
-  return { store, monitor, rpc, stream, inventory, autoHandoff, requests, setPhase: (value: number) => { phase = value },
+  return { store, monitor, rpc, stream, connect, inventory, autoHandoff, requests, setPhase: (value: number) => { phase = value },
     setFailRead: (value: boolean) => { failRead = value },
     setMissingAnchor: (value: boolean) => { missingAnchor = value },
     setLongHistory: (value: boolean) => { longHistory = value },
@@ -356,6 +356,56 @@ it('summarizes existing conversations and alerts on later assistant action', asy
   await restarted.scanOnce()
   expect(stream).toHaveBeenCalledTimes(2)
   expect(restarted.view().attentionTotal).toBe(0)
+})
+
+it('lets the DSH router read bounded persisted messages from a monitored main conversation', async () => {
+  const { monitor, connect, setOldAssistantText } = fixture()
+  setOldAssistantText('进展'.repeat(900))
+  monitor.setEnabled(true)
+  await monitor.scanOnce()
+  const history = await monitor.readHistory('thread-a', 2, new AbortController().signal)
+  expect(history).toMatchObject({ source: 'persisted Codex history', threadId: 'thread-a', complete: true,
+    messages: [{ role: 'user' }, { role: 'assistant', chars: 1_800 }] })
+  expect(history.messages[1]?.text).toHaveLength(1_200)
+  expect(connect).toHaveBeenCalledTimes(2)
+  await expect(monitor.readHistory('unknown', 2, new AbortController().signal)).rejects.toThrow('not monitored')
+  expect(connect).toHaveBeenCalledTimes(2)
+})
+
+it('cancels an active history read when monitoring is disabled or stopped', async () => {
+  for (const action of ['disable', 'stop']) {
+    const { monitor, rpc } = fixture()
+    monitor.setEnabled(true)
+    await monitor.scanOnce()
+    let started!: () => void
+    const entered = new Promise<void>(resolve => { started = resolve })
+    rpc.request.mockImplementationOnce(async (_method, _params, signal) => {
+      started()
+      return await new Promise<never>((_resolve, reject) => {
+        signal!.addEventListener('abort', () => reject(new Error('read cancelled')), { once: true })
+      })
+    })
+    const reading = monitor.readHistory('thread-a', 2, new AbortController().signal)
+    const rejected = expect(reading).rejects.toThrow()
+    await entered
+    if (action === 'disable') monitor.setEnabled(false)
+    else await monitor.stop()
+    await rejected
+    expect(rpc.close).toHaveBeenCalledTimes(2)
+  }
+})
+
+it('marks an empty history window incomplete when the item search limit is exhausted', async () => {
+  const { monitor, rpc } = fixture()
+  monitor.setEnabled(true)
+  await monitor.scanOnce()
+  let page = 0
+  rpc.request.mockImplementation(async method => method === 'thread/turns/list' ? { data: [] } : {
+    data: Array.from({ length: 100 }, (_, index) => ({ turnId: 'turn-a', item: {
+      id: `tool-${page}-${index}`, type: 'commandExecution' } })), nextCursor: `older-${++page}` })
+  expect(await monitor.readHistory('thread-a', 8, new AbortController().signal)).toMatchObject({
+    complete: false, messages: [] })
+  expect(page).toBe(10)
 })
 
 it('keeps an unanswered request through progress commentary in the same turn', async () => {

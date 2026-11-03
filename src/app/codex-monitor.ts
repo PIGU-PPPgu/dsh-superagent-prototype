@@ -136,6 +136,14 @@ export interface CodexRouteHead {
   needsYou: boolean
   ready: boolean
 }
+export interface CodexHistoryView {
+  threadId: string
+  title: string
+  source: 'persisted Codex history'
+  readAt: string
+  complete: boolean
+  messages: { id: string; turnId: string; role: 'user' | 'assistant'; text: string; chars?: number }[]
+}
 
 /** Identify the sentence containing the quoted request or failure, excluding earlier progress sentences. */
 function issueKey(kind: 'human' | 'technical', text: string | undefined, evidence: string | undefined): string {
@@ -249,6 +257,7 @@ export class CodexMonitor {
   private readonly now: () => Date
   private timer?: ReturnType<typeof setTimeout>
   private running?: Promise<void>
+  private readonly historyReads = new Set<Promise<CodexHistoryView>>()
   private controller = new AbortController()
   private started = false
 
@@ -274,6 +283,30 @@ export class CodexMonitor {
       ...(row.assessment?.decision.stage ? { stage: row.assessment.decision.stage } : {}),
       ...(row.assessment?.itemId ? { assessmentItemId: row.assessment.itemId } : {}),
       needsYou: row.assessment?.decision.stage === 'needsYou' || row.userDecisionRequested === true }
+  }
+
+  /** Give the DSH main Session bounded stored context without claiming a live Desktop state. */
+  async readHistory(threadId: string, limit: number, signal: AbortSignal): Promise<CodexHistoryView> {
+    const state = this.state(), row = state.threads[threadId]
+    if (!state.enabled || !row?.present || !isMain(row)) throw new Error('Codex main conversation is not monitored')
+    if (!Number.isInteger(limit) || limit < 1 || limit > 12) throw new Error('Codex history limit must be 1-12')
+    const combined = AbortSignal.any([signal, this.controller.signal])
+    const reading = (async (): Promise<CodexHistoryView> => {
+      combined.throwIfAborted()
+      const rpc = await this.connect(combined)
+      try {
+        combined.throwIfAborted()
+        const recent = await readRecentCodexMessages(rpc, threadId, combined)
+        combined.throwIfAborted()
+        return { threadId, title: row.name ?? threadId, source: 'persisted Codex history',
+          readAt: this.now().toISOString(), complete: recent.complete && recent.messages.length <= limit,
+          messages: recent.messages.slice(-limit).map(message => ({
+            id: message.id, turnId: message.turnId, role: message.role, text: message.text.slice(0, 1_200),
+            ...(message.text.length > 1_200 ? { chars: message.text.length } : {}) })) }
+      } finally { rpc.close() }
+    })()
+    this.historyReads.add(reading)
+    try { return await reading } finally { this.historyReads.delete(reading) }
   }
 
   view(offset = 0, limit = 50, scope: 'recent' | 'all' = 'recent'): CodexMonitorView {
@@ -356,9 +389,9 @@ export class CodexMonitor {
     const state = this.state()
     this.save({ ...state, enabled })
     if (!enabled) { this.controller.abort(); if (this.timer) clearTimeout(this.timer) }
-    else if (this.started) {
+    else {
       if (this.controller.signal.aborted) this.controller = new AbortController()
-      this.schedule(0)
+      if (this.started) this.schedule(0)
     }
     return this.view()
   }
@@ -388,7 +421,7 @@ export class CodexMonitor {
     this.started = false
     if (this.timer) clearTimeout(this.timer)
     this.controller.abort()
-    await this.running?.catch(() => {})
+    await Promise.allSettled([this.running, ...this.historyReads])
   }
   private schedule(delay: number): void {
     if (!this.started || !this.state().enabled) return
