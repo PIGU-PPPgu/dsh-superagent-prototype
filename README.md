@@ -35,6 +35,9 @@ Read the numbered documents in order; each builds only on the ones before it.
 - [010 Codex cloud validation](docs/010-codex-cloud-validation.md): a real cloud Codex CLI thread discovered and exported through the local GUI, with the model-network blocker recorded
 - [011 Codex monitor](docs/011-codex-monitor.md): locally stored Codex history, attention and optional automatic DSH Tickets
 - [012 Codex router](docs/012-codex-router.md): a global digest, priority queue and native Codex control bridge
+- [013 Reporter](docs/013-reporter.md): a standalone Feishu reporter that pushes status and answers remote commands
+
+A separate Reporter process pushes what needs attention to Feishu and answers commands there. It is an independent service, not part of the bundle: it reads the same loopback management API the panel uses and calls only the operations the panel already offers. See [the reporter guide](docs/013-reporter.md) and [reporter/README.md](reporter/README.md).
 
 For a Mac-local history-only GUI, install dependencies and run `pnpm codex:local`; see [the Codex trial guide](docs/009-codex-read-only.md). The GUI needs no model API key and cannot determine live Codex Desktop status.
 

@@ -1,0 +1,22 @@
+{
+  "orchestrator": {
+    "url": "http://127.0.0.1:61104",
+    "timeoutMs": 8000
+  },
+  "feishu": {
+    "cli": "lark-cli",
+    "chatId": "",
+    "userId": "ou_你的_open_id",
+    "operators": ["ou_你的_open_id"],
+    "readers": [],
+    "pollSeconds": 45,
+    "timeoutMs": 30000,
+    "push": {
+      "onChange": true,
+      "minIntervalSeconds": 120,
+      "dailyAt": "09:00",
+      "quietFrom": "23:00",
+      "quietTo": "08:00"
+    }
+  }
+}

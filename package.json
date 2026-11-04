@@ -21,12 +21,16 @@
     "./locale/*.json": "./locale/*.json"
   },
   "files": [
-    "lib",
-    "cordis.patch.yml",
-    "locale/*.json",
     "README.md",
-    "scripts/codex-control-bridge.mjs",
+    "cordis.patch.yml",
+    "lib",
+    "locale/*.json",
     "prompts",
+    "reporter",
+    "reporter/README.md",
+    "reporter/config.example.json",
+    "reporter/launchd",
+    "scripts/codex-control-bridge.mjs",
     "skills"
   ],
   "dsh": {
@@ -51,7 +55,9 @@
     "codex:local": "pnpm build && node scripts/codex-local.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "check": "pnpm typecheck && pnpm test && pnpm build"
+    "check": "pnpm typecheck && pnpm test && pnpm build",
+    "reporter": "node reporter/cli.mjs",
+    "reporter:test": "node --test \"reporter/test/*.test.mjs\""
   },
   "engines": {
     "node": "^22.19.0 || >=24.0.0",
