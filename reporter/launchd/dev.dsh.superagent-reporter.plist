@@ -6,8 +6,8 @@
 	<string>dev.dsh.superagent-reporter</string>
 	<key>ProgramArguments</key>
 	<array>
-		<!-- Replace with the checkout that holds reporter/cli.mjs -->
-		<string>/usr/local/bin/node</string>
+		<!-- Adjust node and the checkout that holds reporter/cli.mjs -->
+		<string>/opt/homebrew/bin/node</string>
 		<string>/Users/iguppp/src/dsh-superagent-prototype-codex-monitor/reporter/cli.mjs</string>
 		<string>run</string>
 	</array>
@@ -15,6 +15,10 @@
 	<true/>
 	<key>KeepAlive</key>
 	<true/>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>WorkingDirectory</key>
+	<string>/Users/iguppp/src/dsh-superagent-prototype-codex-monitor</string>
 	<key>StandardOutPath</key>
 	<string>/Users/iguppp/.dsh/state/superagent-reporter/reporter.log</string>
 	<key>StandardErrorPath</key>
@@ -23,6 +27,8 @@
 	<dict>
 		<key>PATH</key>
 		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+		<key>DSH_REPORTER_CONFIG</key>
+		<string>/Users/iguppp/.dsh/state/superagent-reporter/config.json</string>
 	</dict>
 </dict>
 </plist>
