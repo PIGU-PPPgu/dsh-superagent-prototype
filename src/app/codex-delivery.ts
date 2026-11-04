@@ -96,6 +96,7 @@ export class CodexDelivery {
           this.host.control.finish(claimed.id, 'sent', { turnId: result.turnId })
           if (result.settingsPreserved !== true) this.host.control.setEnabled(false)
           this.notice(claimed, interrupt ? 'interrupted' : 'sent', { turnId: result.turnId, settingsVerified: result.settingsPreserved === true,
+            ...('runtimeRootsChanged' in result && result.runtimeRootsChanged ? { runtimeRootsChanged: true } : {}),
             ...(result.settingsPreserved === true ? {} : { controlDisabled: true }) })
         } catch (error) {
           const code = error instanceof CodexDesktopIpcError ? error.code : 'delivery-uncertain'

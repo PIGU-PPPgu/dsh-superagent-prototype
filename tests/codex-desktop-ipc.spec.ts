@@ -216,7 +216,16 @@ it('rejects deeply nested snapshot settings with a fixed error instead of throwi
   }
 })
 
-it.each(['workspace', 'full-access'])('starts text with inherited %s settings only and refuses a newly active thread', async profile => {
+it.each([
+  { profile: 'workspace', change: 'none', preserved: true },
+  { profile: 'full-access', change: 'roots', preserved: true },
+  { profile: 'workspace', change: 'roots', preserved: false },
+  { profile: 'full-access', change: 'approval', preserved: false },
+  { profile: 'full-access', change: 'reviewer', preserved: false },
+  { profile: 'full-access', change: 'profile', preserved: false },
+  { profile: 'full-access', change: 'extra', preserved: false },
+  { profile: 'full-access', change: 'model', preserved: false },
+])('inherits $profile settings and checks $change changes after sending', async ({ profile, change, preserved }) => {
   const threadId = randomUUID(), turnId = randomUUID(), messageId = randomUUID()
   let active = false, pending = false
   const test = await fixture((message, socket) => {
@@ -224,14 +233,22 @@ it.each(['workspace', 'full-access'])('starts text with inherited %s settings on
     if (message.method === 'thread-owner-discovery') socket.write(frame({ type: 'response',
       requestId: message.requestId, method: message.method, resultType: 'success', handledByClientId: ownerId, result: {} }))
     else if (message.method === 'thread-stream-following-changed' && (message.params as { following: boolean }).following) {
+      const currentPermissions: Record<string, unknown> = profile === 'full-access'
+        ? { activePermissionProfile: { id: ':danger-full-access', extends: null }, approvalPolicy: 'never',
+          approvalsReviewer: 'user', sandboxPolicy: { type: 'dangerFullAccess' } } : knownPermissions()
+      if (active) {
+        if (change === 'roots') currentPermissions.runtimeWorkspaceRoots = ['/changed-root']
+        if (change === 'approval') currentPermissions.approvalPolicy = 'on-request'
+        if (change === 'reviewer') currentPermissions.approvalsReviewer = 'auto_review'
+        if (change === 'profile') currentPermissions.activePermissionProfile = { id: ':workspace', extends: null }
+        if (change === 'extra') currentPermissions.futurePolicy = { enabled: true }
+      }
       socket.write(frame({ type: 'broadcast', method: 'thread-stream-state-changed', sourceClientId: ownerId,
         targetClientIds: [clientId], version: 11, params: { hostId: 'local', conversationId: threadId,
           change: { type: 'snapshot', revision: 1, conversationState: { id: threadId, cwd: '/test', workspaceKind: 'project',
             turns: active ? [{ turnId, status: 'inProgress' }] : [], requests: pending ? [{}] : [],
-            threadRuntimeStatus: { type: active ? 'active' : 'idle' }, currentPermissions: profile === 'full-access'
-              ? { activePermissionProfile: { id: ':danger-full-access', extends: null }, approvalPolicy: 'never',
-                approvalsReviewer: 'user', sandboxPolicy: { type: 'dangerFullAccess' } } : knownPermissions(),
-            latestThreadSettings: { model: 'existing-model' } } } } }))
+            threadRuntimeStatus: { type: active ? 'active' : 'idle' }, currentPermissions,
+            latestThreadSettings: { model: active && change === 'model' ? 'changed-model' : 'existing-model' } } } } }))
     } else if (message.method === 'thread-follower-start-turn') {
       active = true
       socket.write(frame({ type: 'response', requestId: message.requestId, method: message.method,
@@ -242,7 +259,13 @@ it.each(['workspace', 'full-access'])('starts text with inherited %s settings on
   try {
     const before = (await client.readState(threadId))!
     expect(await client.startText(before, 'Reply with TEST OK only', messageId)).toEqual({
-      clientUserMessageId: messageId, turnId, settingsPreserved: true })
+      clientUserMessageId: messageId, turnId, settingsPreserved: preserved,
+      ...(profile === 'full-access' && change === 'roots' ? { runtimeRootsChanged: true } : {}) })
+    if (change === 'roots') {
+      const after = (await client.readState(threadId))!
+      expect(after.permissionsHash).not.toBe(before.permissionsHash)
+      expect(after.permissionsPolicyHash === before.permissionsPolicyHash).toBe(profile === 'full-access')
+    }
     const sent = test.received.filter(message => message.method === 'thread-follower-start-turn')
     expect(sent).toHaveLength(1)
     expect(sent[0]).toMatchObject({ targetClientId: ownerId, version: 2,

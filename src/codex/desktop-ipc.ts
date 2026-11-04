@@ -35,10 +35,11 @@ export interface CodexDesktopOwner { clientId: string; supportsUntrustedAppInput
 export interface CodexDesktopState extends CodexDesktopOwner {
   threadId: string; revision: number; status: 'idle' | 'active' | 'notLoaded' | 'systemError' | 'unknown'
   activeTurnId?: string; pendingRequests: number; cwd?: string; workspaceKind?: string
-  permissionsKnown: boolean; permissionsHash: string; settingsHash: string
+  permissionsKnown: boolean; permissionsHash: string; permissionsPolicyHash?: string; settingsHash: string
 }
-export interface CodexDesktopDelivery { clientUserMessageId: string; turnId: string; settingsPreserved?: boolean }
-export interface CodexDesktopInterrupt { turnId: string; settingsPreserved?: boolean }
+interface SettingsCheck { settingsPreserved?: boolean; runtimeRootsChanged?: true }
+export interface CodexDesktopDelivery extends SettingsCheck { clientUserMessageId: string; turnId: string }
+export interface CodexDesktopInterrupt extends SettingsCheck { turnId: string }
 type StateRead = { owner: CodexDesktopOwner; resolve(value: CodexDesktopState): void; reject(error: Error): void; cleanup(): void }
 const fingerprint = (value: unknown) => createHash('sha256').update(JSON.stringify(value ?? null)).digest('hex')
 /** Safe protocol failure codes without Desktop response payloads. */
@@ -181,13 +182,8 @@ export class CodexDesktopIpc {
     if (response.handledByClientId !== current.clientId || !result.success) {
       throw new CodexDesktopIpcError('delivery-uncertain')
     }
-    let settingsPreserved: boolean | undefined
-    try {
-      const after = await this.readState(current.threadId, signal)
-      if (after) settingsPreserved = after.permissionsHash === current.permissionsHash && after.settingsHash === current.settingsHash
-    } catch { /* Delivery already succeeded; a failed post-check must never cause a resend. */ }
     return { clientUserMessageId, turnId: result.data.result.turn.id,
-      ...(settingsPreserved === undefined ? {} : { settingsPreserved }) }
+      ...await this.checkSettings(current, signal) }
   }
 
   close(): void { this.fail('connection-closed') }
@@ -218,13 +214,18 @@ export class CodexDesktopIpc {
     if (response.handledByClientId !== current.clientId || !result.success) throw new CodexDesktopIpcError('delivery-uncertain')
     if (result.data.interruptedTurnId === null) throw new CodexDesktopIpcError('thread-state-changed')
     if (result.data.interruptedTurnId !== current.activeTurnId) throw new CodexDesktopIpcError('delivery-uncertain')
-    let settingsPreserved: boolean | undefined
+    return { turnId: result.data.interruptedTurnId, ...await this.checkSettings(current, signal) }
+  }
+
+  private async checkSettings(before: CodexDesktopState, signal?: AbortSignal): Promise<SettingsCheck> {
     try {
-      const after = await this.readState(current.threadId, signal)
-      if (after) settingsPreserved = after.permissionsHash === current.permissionsHash && after.settingsHash === current.settingsHash
-    } catch { /* An acknowledged interrupt must never be retried because its post-check failed. */ }
-    return { turnId: result.data.interruptedTurnId,
-      ...(settingsPreserved === undefined ? {} : { settingsPreserved }) }
+      const after = await this.readState(before.threadId, signal)
+      if (!after) return {}
+      const samePolicy = after.permissionsKnown && (after.permissionsPolicyHash ?? after.permissionsHash)
+        === (before.permissionsPolicyHash ?? before.permissionsHash)
+      return { settingsPreserved: samePolicy && after.settingsHash === before.settingsHash,
+        ...(samePolicy && after.permissionsHash !== before.permissionsHash ? { runtimeRootsChanged: true } : {}) }
+    } catch { return {} /* An acknowledged action must never be retried because its post-check failed. */ }
   }
 
   private call(method: 'initialize' | 'thread-owner-discovery' | 'thread-follower-start-turn' | 'thread-follower-interrupt-turn', version: number, params: unknown,
@@ -328,13 +329,21 @@ export class CodexDesktopIpc {
     const flags = runtime.success ? runtime.data.activeFlags ?? [] : []
     const permissions = Permissions.safeParse(state.currentPermissions)
     const profile = permissions.success ? permissions.data.activePermissionProfile : undefined
+    // Full access has no directory boundary. Desktop may initialize these runtime roots
+    // on the first inherited turn; preserve the raw hash for the strict pre-send guard.
+    let policy = state.currentPermissions
+    if (permissions.success && permissions.data.sandboxPolicy.type === 'dangerFullAccess') {
+      const { runtimeWorkspaceRoots: _roots, ...configuration } = state.currentPermissions as Record<string, unknown>
+      policy = configuration
+    }
     const result: CodexDesktopState = { ...reading.owner, threadId: state.id, revision, status,
       ...(turns.length === 1 ? { activeTurnId: turns[0]! } : {}),
       pendingRequests: state.requests.length + Number(flags.some(flag => /approval|userinput/i.test(flag))),
       ...(state.cwd ? { cwd: state.cwd } : {}), ...(state.workspaceKind ? { workspaceKind: state.workspaceKind } : {}),
       permissionsKnown: permissions.success && (profile === null || !!profile && PROFILES.has(profile.id)
         && (profile.extends === null || PROFILES.has(profile.extends))),
-      permissionsHash: fingerprint(state.currentPermissions), settingsHash: fingerprint(state.latestThreadSettings) }
+      permissionsHash: fingerprint(state.currentPermissions), permissionsPolicyHash: fingerprint(policy),
+      settingsHash: fingerprint(state.latestThreadSettings) }
     reading.cleanup(); reading.resolve(result)
   }
   private fail(code: string): void {
