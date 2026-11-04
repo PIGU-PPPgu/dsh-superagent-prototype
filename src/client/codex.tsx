@@ -116,11 +116,11 @@ export function CodexPage() {
     </section>}
 
     {control && <section>
-      <div className="dt-row-buttons"><h3>{chinese ? '会话通信' : 'Session messages'}</h3>
+      <div className="dt-row-buttons"><h3>{chinese ? '会话控制' : 'Session control'}</h3>
         <Button variant="outline" size="sm" disabled={controlToggle.busy || !control.bridgeReady && !control.enabled}
           onClick={() => { void controlToggle.run(!control.enabled) }}>
-          {control.enabled ? (chinese ? '关闭通信' : 'Disable messaging')
-            : (chinese ? '开启通信' : 'Enable messaging')}
+          {control.enabled ? (chinese ? '关闭控制' : 'Disable control')
+            : (chinese ? '开启控制' : 'Enable control')}
         </Button></div>
       <p className="dt-hint">{control.bridgeReady
         ? (chinese ? '已连接 Codex Desktop · 审批仍由你处理' : 'Codex Desktop connected · approvals stay with you')

@@ -36,12 +36,12 @@ it('shows the DSH Router brief and keeps native control disabled until the bridg
   expect(text()).toContain('路由简报')
   expect(text()).toContain('选择发布目标')
   expect(text()).toContain('等待 Codex Desktop 连接')
-  const enable = [...document.querySelectorAll('button')].find(button => button.textContent === '开启通信')!
+  const enable = [...document.querySelectorAll('button')].find(button => button.textContent === '开启控制')!
   expect(enable.hasAttribute('disabled')).toBe(true)
   server.codexControl = { ...server.codexControl, bridgeReady: true }
   await click(tab(zh['tab.overview']))
   await click(tab(zh['tab.codex']))
-  await click('开启通信')
+  await click('开启控制')
   expect(server.requests).toContainEqual({ path: 'codex/control', method: 'POST', body: { enabled: true } })
 })
 
