@@ -216,7 +216,7 @@ it('rejects deeply nested snapshot settings with a fixed error instead of throwi
   }
 })
 
-it('starts text with inherited settings only and refuses a newly active thread', async () => {
+it.each(['workspace', 'full-access'])('starts text with inherited %s settings only and refuses a newly active thread', async profile => {
   const threadId = randomUUID(), turnId = randomUUID(), messageId = randomUUID()
   let active = false, pending = false
   const test = await fixture((message, socket) => {
@@ -228,7 +228,9 @@ it('starts text with inherited settings only and refuses a newly active thread',
         targetClientIds: [clientId], version: 11, params: { hostId: 'local', conversationId: threadId,
           change: { type: 'snapshot', revision: 1, conversationState: { id: threadId, cwd: '/test', workspaceKind: 'project',
             turns: active ? [{ turnId, status: 'inProgress' }] : [], requests: pending ? [{}] : [],
-            threadRuntimeStatus: { type: active ? 'active' : 'idle' }, currentPermissions: knownPermissions(),
+            threadRuntimeStatus: { type: active ? 'active' : 'idle' }, currentPermissions: profile === 'full-access'
+              ? { activePermissionProfile: { id: ':danger-full-access', extends: null }, approvalPolicy: 'never',
+                approvalsReviewer: 'user', sandboxPolicy: { type: 'dangerFullAccess' } } : knownPermissions(),
             latestThreadSettings: { model: 'existing-model' } } } } }))
     } else if (message.method === 'thread-follower-start-turn') {
       active = true
@@ -257,7 +259,7 @@ it('starts text with inherited settings only and refuses a newly active thread',
 })
 
 it('does not send when turn metadata or permissions are malformed', async () => {
-  for (const malformed of ['turn', 'permissions', 'policy', 'profile']) {
+  for (const malformed of ['turn', 'permissions', 'policy', 'profile', 'roots']) {
     const threadId = randomUUID()
     const test = await fixture((message, socket) => {
       if (initialize(message, socket)) return
@@ -270,6 +272,7 @@ it('does not send when turn metadata or permissions are malformed', async () => 
               turns: malformed === 'turn' ? [{ turnId: 'invalid', status: 'inProgress' }] : [], requests: [],
               threadRuntimeStatus: { type: 'idle' }, currentPermissions: malformed === 'permissions' ? false
                 : malformed === 'policy' ? { ...knownPermissions(), approvalPolicy: false }
+                  : malformed === 'roots' ? { ...knownPermissions(), runtimeWorkspaceRoots: undefined }
                   : malformed === 'profile' ? { ...knownPermissions(), activePermissionProfile: { id: 'custom', extends: null } }
                     : knownPermissions(),
               latestThreadSettings: {} } } } }))

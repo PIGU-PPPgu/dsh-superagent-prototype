@@ -18,7 +18,7 @@ const Permissions = z.looseObject({
   activePermissionProfile: z.object({ id: z.string(), extends: z.string().nullable() }).nullable(),
   approvalPolicy: z.enum(['untrusted', 'on-request', 'never']),
   approvalsReviewer: z.enum(['user', 'auto_review', 'guardian_subagent']),
-  runtimeWorkspaceRoots: z.array(z.string()),
+  runtimeWorkspaceRoots: z.array(z.string()).optional(),
   sandboxPolicy: z.discriminatedUnion('type', [
     z.looseObject({ type: z.literal('dangerFullAccess') }),
     z.looseObject({ type: z.literal('readOnly'), networkAccess: z.boolean() }),
@@ -26,7 +26,7 @@ const Permissions = z.looseObject({
     z.looseObject({ type: z.literal('workspaceWrite'), writableRoots: z.array(z.string()), networkAccess: z.boolean(),
       excludeTmpdirEnvVar: z.boolean(), excludeSlashTmp: z.boolean() }),
   ]),
-})
+}).refine(value => value.runtimeWorkspaceRoots !== undefined || value.sandboxPolicy.type === 'dangerFullAccess')
 const run = promisify(execFile)
 type Response = { type: 'response'; requestId: string; method: string; resultType: 'success' | 'error';
   handledByClientId?: string; result?: unknown; error?: string }
