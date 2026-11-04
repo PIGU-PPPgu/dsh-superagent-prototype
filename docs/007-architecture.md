@@ -319,7 +319,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/codex/file-bridge.ts` | JSON snapshot file input and watchlist reload for the DSH main Session |
 | `src/codex/private-file.ts` | Size-bounded, owner-only regular-file reads for the local watchlist and snapshot |
 | `src/codex/stdio.ts` | Read-only stdio JSON-RPC transport to a separately started Codex App Server |
-| `src/codex/desktop-ipc.ts` | Version-pinned private Desktop IPC owner/snapshot reads, plus text starts not enabled in Runtime |
+| `src/codex/desktop-ipc.ts` | Version-pinned Desktop owner/snapshot reads, inherited text starts and turn-guarded interrupts |
 | `src/codex/export.ts` | One-shot history-only snapshot exporter with atomic private-file replacement |
 | `src/codex/discovery.ts` | Bounded local-only discovery of stored Codex thread IDs for the operator's allowlist |
 | `src/codex/monitor-read.ts` | Read-only pagination of all locally indexed Codex threads and bounded new user/agent messages |
@@ -329,10 +329,10 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/codex/local-ui.ts` | Self-contained local dashboard HTML, CSS and browser code |
 | `src/codex/index.ts` | Public read-only Codex adapter exports |
 | `src/app/runtime.ts` | The Runtime, the composition root, with its start and stop |
-| `src/app/codex-monitor.ts` | Automatic Codex history scan, model triage, private persistence, panel attention and separately enabled failure handoff |
+| `src/app/codex-monitor.ts` | Codex history scan, model triage, private persistence and separately enabled candidates for main-Session routing |
 | `src/app/codex-router.ts` | Bounded global Codex digest, meaningful-change audit and delivery to the DSH main Session |
 | `src/app/codex-control.ts` | Durable Codex follow-up queue and native bridge receipts, without direct Desktop RPC access |
-| `src/app/codex-delivery.ts` | In-process DSH delivery of router-authored Codex follow-ups with owner, history and permission guards |
+| `src/app/codex-delivery.ts` | In-process DSH delivery of router-authored Codex follow-ups and interrupts with owner, history and permission guards |
 | `src/app/setup.ts` | Setup, and `setupChanged`, whether a save changes a field setup reads |
 | `src/app/passes.ts` | Passes, the pass scheduler |
 | `src/app/outbox.ts` | The Outbox: the Engine's `Outbox` port, the receipts and the `reply` effects that send them |
@@ -440,6 +440,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/codex-control.spec.ts` | Codex control queue ordering, persistence and uncertain-send deduplication |
 | `tests/codex-desktop-ipc.spec.ts` | Private IPC framing, ownership, snapshots, cancellation, inherited settings and uncertain delivery |
 | `tests/codex-delivery.spec.ts` | DSH-owned delivery, active/approval holds, stale history, uncertain sends and settings verification |
+| `tests/codex-interrupt.spec.ts` | Main-Session exact-turn interrupts, approval holds and refusal to send text through interrupt |
 | `tests/codex-workspace.spec.ts` | Isolated Codex analysis and repository-bound execution workspaces, plus panel-only reporting |
 | `tests/commands.spec.ts` | CLI calls as the deployment's accounts, the Channels' answers, and repository-scoped GitHub calls |
 | `tests/github-binding.spec.ts` | GitHub binding isolation for commands, cursors, threads and tickets |

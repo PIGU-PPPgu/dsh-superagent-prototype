@@ -114,3 +114,25 @@ it('refuses a stale native claim after a DSH Ticket takes ownership of the conve
     expect(control.view().intents[0]?.status).toBe('cancelled')
   } finally { store.close() }
 })
+
+it('defaults legacy authorization to zero and persists revocation across a control restart', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'codex-authorization-'))
+  directories.push(directory)
+  const store = new Store(join(directory, 'orchestrator.sqlite'))
+  try {
+    store.set('codex-control-v1', { version: 1, enabled: true, intents: {} })
+    const control = new CodexControl({ store, stateDir: directory })
+    const prepared = { threadId: 'thread-one', basedOnItemId: 'item-one', text: 'Continue the task.',
+      reason: 'Router decision', source: 'router' as const, token: control.view().token }
+    expect(prepared.token).toBe(0)
+    control.setEnabled(false)
+    expect(() => control.enqueue(prepared)).toThrow('disabled')
+    control.setEnabled(true)
+    const restarted = new CodexControl({ store, stateDir: directory })
+    expect(restarted.view().token).toBe(control.view().token)
+    expect(restarted.view().token).not.toBe(prepared.token)
+    expect(() => restarted.enqueue(prepared)).toThrow('authorization changed')
+    expect(restarted.view().intents).toEqual([])
+    expect(restarted.enqueue({ ...prepared, token: restarted.view().token }).status).toBe('queued')
+  } finally { store.close() }
+})

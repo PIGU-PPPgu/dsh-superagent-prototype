@@ -53,7 +53,7 @@ describe('source scope', () => {
 describe('gate', () => {
   it('admits only the internally authorized Codex handoff without an external reply channel', () => {
     const handoff: Trigger = { id: 'codex-handoff', source: 'codex', threads: [{ source: 'codex', id: 'thread:item' }],
-      actor: { source: 'codex', id: 'local-codex-monitor' }, human: true, addressed: 'direct', at: '', text: 'Fix this',
+      actor: { source: 'codex', id: 'local-codex-monitor' }, human: false, addressed: 'direct', at: '', text: 'Fix this',
       meta: { threadId: 'thread', itemId: 'item' } }
     const authorized = settingsPolicy(base, sources, trigger => trigger.id === handoff.id)
     const accepted = authorized.gate(handoff, thread(), [])
@@ -61,11 +61,11 @@ describe('gate', () => {
     if (!accepted.admissible) throw new Error('Expected handoff authorization')
     expect(authorized.revalidate({ strength: accepted.strength, policyVersion: 'v', basis: accepted.basis,
       actor: handoff.actor, scope: '' })).toBe(true)
-    expect(settingsPolicy(base, sources).gate(handoff, thread(), [])).toEqual({ admissible: false, reason: 'not_a_member' })
+    expect(settingsPolicy(base, sources).gate(handoff, thread(), [])).toEqual({ admissible: false, reason: 'not_human' })
     expect(authorized.gate({ ...handoff, actor: { source: 'codex', id: 'other' } }, thread(), []))
-      .toEqual({ admissible: false, reason: 'not_a_member' })
+      .toEqual({ admissible: false, reason: 'not_human' })
     expect(authorized.gate({ ...handoff, channel: { source: 'codex', thread: 'codex:thread', address: {} } }, thread(), []))
-      .toEqual({ admissible: false, reason: 'not_a_member' })
+      .toEqual({ admissible: false, reason: 'not_human' })
   })
   it('grants explicit strength when the sender is allowed in its Source\'s part and the Source marked the Trigger addressed', () => {
     expect(policy.gate(feishu(), thread(), [])).toMatchObject({ admissible: true, strength: 'explicit', basis: { via: 'addressed', source: 'feishu', sender: 'Alice', addressed: 'mention', scope: { chatId: CHAT } } })

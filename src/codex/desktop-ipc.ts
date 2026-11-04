@@ -38,6 +38,7 @@ export interface CodexDesktopState extends CodexDesktopOwner {
   permissionsKnown: boolean; permissionsHash: string; settingsHash: string
 }
 export interface CodexDesktopDelivery { clientUserMessageId: string; turnId: string; settingsPreserved?: boolean }
+export interface CodexDesktopInterrupt { turnId: string; settingsPreserved?: boolean }
 type StateRead = { owner: CodexDesktopOwner; resolve(value: CodexDesktopState): void; reject(error: Error): void; cleanup(): void }
 const fingerprint = (value: unknown) => createHash('sha256').update(JSON.stringify(value ?? null)).digest('hex')
 /** Safe protocol failure codes without Desktop response payloads. */
@@ -191,7 +192,42 @@ export class CodexDesktopIpc {
 
   close(): void { this.fail('connection-closed') }
 
-  private call(method: 'initialize' | 'thread-owner-discovery' | 'thread-follower-start-turn', version: number, params: unknown,
+  /** Stop only the observed turn; the Desktop owner atomically checks expectedTurnId. */
+  async interruptTurn(expected: CodexDesktopState, signal?: AbortSignal,
+    canSend?: () => boolean): Promise<CodexDesktopInterrupt> {
+    if (!uuid.safeParse(expected.activeTurnId).success) throw new CodexDesktopIpcError('invalid-turn-id')
+    const current = await this.readState(expected.threadId, signal)
+    if (!current || current.clientId !== expected.clientId || current.status !== 'active'
+      || current.activeTurnId !== expected.activeTurnId || current.pendingRequests
+      || !current.permissionsKnown || current.workspaceKind !== 'project'
+      || current.permissionsHash !== expected.permissionsHash || current.settingsHash !== expected.settingsHash) {
+      throw new CodexDesktopIpcError('thread-state-changed')
+    }
+    if (canSend && !canSend()) throw new CodexDesktopIpcError('delivery-held')
+    if (signal?.aborted) throw new CodexDesktopIpcError('cancelled')
+    if (this.closed) throw new CodexDesktopIpcError('not-connected')
+    let response: Response
+    try {
+      // This mode plus expectedTurnId skips Desktop's goal and descendant cleanup,
+      // which otherwise declines pending approval requests in child conversations.
+      response = await this.call('thread-follower-interrupt-turn', 4, {
+        conversationId: current.threadId, mode: 'descendant-cleanup', expectedTurnId: current.activeTurnId,
+      }, signal, current.clientId)
+    } catch { throw new CodexDesktopIpcError('delivery-uncertain') }
+    const result = z.object({ ok: z.literal(true), interruptedTurnId: uuid.nullable() }).safeParse(response.result)
+    if (response.handledByClientId !== current.clientId || !result.success) throw new CodexDesktopIpcError('delivery-uncertain')
+    if (result.data.interruptedTurnId === null) throw new CodexDesktopIpcError('thread-state-changed')
+    if (result.data.interruptedTurnId !== current.activeTurnId) throw new CodexDesktopIpcError('delivery-uncertain')
+    let settingsPreserved: boolean | undefined
+    try {
+      const after = await this.readState(current.threadId, signal)
+      if (after) settingsPreserved = after.permissionsHash === current.permissionsHash && after.settingsHash === current.settingsHash
+    } catch { /* An acknowledged interrupt must never be retried because its post-check failed. */ }
+    return { turnId: result.data.interruptedTurnId,
+      ...(settingsPreserved === undefined ? {} : { settingsPreserved }) }
+  }
+
+  private call(method: 'initialize' | 'thread-owner-discovery' | 'thread-follower-start-turn' | 'thread-follower-interrupt-turn', version: number, params: unknown,
     signal?: AbortSignal, targetClientId?: string): Promise<Response> {
     if (this.closed || signal?.aborted) return Promise.reject(new CodexDesktopIpcError('not-connected'))
     const requestId = randomUUID()

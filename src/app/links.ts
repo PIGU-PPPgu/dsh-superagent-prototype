@@ -56,7 +56,13 @@ export async function candidateCard(host: LinkHost, candidate: Candidate) {
   const primary = candidate.triggers.at(-1)!
   const settings = host.store.settings()
   const delivered = host.store.triggers.disposition(primary.id)?.fanout ?? []
-  const referenced = referencedTickets(host, primary, candidate.tickets)
+  const codexTickets = primary.source === 'codex' && typeof primary.meta.threadId === 'string'
+    ? host.store.tickets.list().filter(ticket => {
+      const origin = host.store.triggers.get(ticket.origin.triggerId)
+      return origin?.source === 'codex' && origin.meta.threadId === primary.meta.threadId
+    }) : []
+  const related = [...new Map([...candidate.tickets, ...codexTickets].map(ticket => [ticket.id, ticket])).values()]
+  const referenced = referencedTickets(host, primary, related)
   // Triggers that a worker Session handed back as outside its ticket's scope, with the worker's reason.
   const handedBack = candidate.triggers.flatMap(trigger => (host.store.triggers.disposition(trigger.id)?.handbacks ?? [])
     .map(item => ({ trigger_id: trigger.id, ticket_id: item.ticketId, reason: item.reason })))
@@ -64,7 +70,7 @@ export async function candidateCard(host: LinkHost, candidate: Candidate) {
   const others = candidate.triggers.filter(trigger => trigger.id !== primary.id)
   return { ...triggerMessage(primary, await sourceLink(host, primary), undefined, repliedTo(host, primary)), strength: candidate.strength,
     mode: settings.eval.mode, ...others.length ? { batch: others.map(trigger => triggerCard(trigger)) } : {},
-    ...handedBack.length ? { handed_back: handedBack } : {}, ...relatedTickets(candidate.tickets),
+    ...handedBack.length ? { handed_back: handedBack } : {}, ...relatedTickets(related),
     ...(delivered.length ? { delivered_to: delivered } : {}), ...(referenced.length ? { referenced_tickets: referenced.map(ticketCard) } : {}),
     next_action: candidate.strength === 'explicit' ? 'Route it with orchestrator_route as dispatch says: accept, attach, stop or ignore.'
       : 'Ignore it with orchestrator_route if the card shows it touches no enabled rule; else assess it with orchestrator_eval, orchestrator_eval_read, then orchestrator_eval_decide.' }

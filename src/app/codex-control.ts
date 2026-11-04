@@ -24,10 +24,13 @@ export interface CodexControlIntent {
   error?: string
   deliveryId?: string
   turnId?: string
+  operation?: 'interrupt'
+  expectedTurnId?: string
 }
-interface ControlState { version: 1; enabled: boolean; intents: Record<string, CodexControlIntent> }
+interface ControlState { version: 1; enabled: boolean; token?: number; intents: Record<string, CodexControlIntent> }
 export interface CodexControlView {
   enabled: boolean
+  token?: number
   bridgeReady: boolean
   bridgeSeenAt?: string
   intents: CodexControlIntent[]
@@ -75,9 +78,9 @@ export class CodexControl {
   }
 
   view(): CodexControlView {
-    const bridge = this.bridge()
-    return { enabled: this.state().enabled, bridgeReady: !!bridge,
-      ...(bridge ? { bridgeSeenAt: bridge.at } : {}), intents: Object.values(this.state().intents)
+    const state = this.state(), bridge = this.bridge()
+    return { enabled: state.enabled, token: state.token ?? 0, bridgeReady: !!bridge,
+      ...(bridge ? { bridgeSeenAt: bridge.at } : {}), intents: Object.values(state.intents)
         .sort((a, b) => Number(active(b.status)) - Number(active(a.status)) || b.priority - a.priority
           || b.createdAt.localeCompare(a.createdAt)) }
   }
@@ -88,7 +91,7 @@ export class CodexControl {
         const state = this.state(), at = this.now()
         const intents = enabled ? state.intents : Object.fromEntries(Object.entries(state.intents).map(([id, intent]) =>
           [id, intent.status === 'queued' ? { ...intent, status: 'cancelled' as const, updatedAt: at } : intent]))
-        this.save({ ...state, enabled, intents })
+        this.save({ ...state, enabled, token: (state.token ?? 0) + Number(state.enabled !== enabled), intents })
       })
       this.writeQueue()
       return this.view()
@@ -166,27 +169,39 @@ export class CodexControl {
     })
   }
   enqueue(input: { threadId: string; basedOnItemId: string; text: string; reason: string; priority?: number;
-    source: 'router' | 'panel' }): CodexControlIntent {
+    source: 'router' | 'panel'; operation?: 'interrupt'; expectedTurnId?: string; token?: number }): CodexControlIntent {
+    const token = input.token ?? this.state().token ?? 0
     const threadId = CodexIdSchema.parse(input.threadId)
     const basedOnItemId = CodexIdSchema.parse(input.basedOnItemId)
     const text = z.string().trim().min(1).max(1000).parse(input.text)
     const reason = z.string().trim().min(1).max(300).parse(input.reason)
     const priority = z.number().int().min(0).max(3).parse(input.priority ?? 1)
+    const expectedTurnId = input.operation === 'interrupt' ? z.uuid().parse(input.expectedTurnId) : undefined
+    if (!input.operation && input.expectedTurnId) throw new Error('Only an interrupt targets an active turn')
     return this.locked(() => {
       this.syncUnlocked()
       const result = this.deps.store.atomic(() => {
-        const state = this.state(), matches = Object.values(state.intents).filter(intent => intent.threadId === threadId
-          && intent.basedOnItemId === basedOnItemId && intent.text === text)
+        const state = this.state()
+        if (!state.enabled) throw new Error('Codex control is disabled')
+        if (token !== (state.token ?? 0)) {
+          throw new Error('Codex control authorization changed; read control state again')
+        }
+        const matches = Object.values(state.intents).filter(intent => intent.threadId === threadId
+          && intent.basedOnItemId === basedOnItemId && intent.text === text
+          && intent.operation === input.operation && intent.expectedTurnId === expectedTurnId)
         if (this.ownedThreads().has(threadId)) throw new Error('An active DSH Ticket owns this Codex conversation')
         const existing = matches.find(intent => active(intent.status) || intent.status === 'sent')
         if (existing) return existing
         if (Object.values(state.intents).some(intent => intent.threadId === threadId && active(intent.status))) {
           throw new Error('This Codex conversation already has a pending router intent')
         }
-        const id = key('codex-control-followup', threadId, basedOnItemId, text, String(matches.length))
+        const id = input.operation === 'interrupt'
+          ? key('codex-control-interrupt', threadId, expectedTurnId!, basedOnItemId, text, String(matches.length))
+          : key('codex-control-followup', threadId, basedOnItemId, text, String(matches.length))
         const at = this.now()
         const intent: CodexControlIntent = { id, threadId, basedOnItemId, text, reason,
-          priority, status: 'queued', source: input.source, createdAt: at, updatedAt: at }
+          priority, status: 'queued', source: input.source, createdAt: at, updatedAt: at,
+          ...(input.operation ? { operation: input.operation, expectedTurnId } : {}) }
         this.save({ ...state, intents: { ...state.intents, [id]: intent } })
         return intent
       })

@@ -48,8 +48,9 @@ export const KV = {
     stream: family<{ since: string; started: Record<string, string>; etag?: string }, [stream: string]>('github-stream:'),
     branchCi: record<{ branch?: string; failures?: string[]; revision: number }>('github-branch-ci'),
     ci: family<{ fingerprint: string; revision: number }, [number: number]>('github-ci:') },
-  /** Codex auto handoff: latest ticket for each original thread, keyed separately from read-only monitor cursors. */
-  codex: { handoff: family<{ itemId: string; ticketId: string; at: string }, [threadId: string]>('codex-handoff:') },
+  /** Codex intake grants and latest ticket mappings, separate from history cursors. */
+  codex: { handoff: family<{ itemId: string; ticketId: string; at: string }, [threadId: string]>('codex-handoff:'),
+    intake: family<{ threadId: string; itemId: string; generation: string }, [triggerId: string]>('codex-intake:') },
   /**
    * Feishu Source: known chats (`true` for direct messages); per-chat history cursor and active topics mapped from topic ID
    * to last-seen timestamp; and per-polled-thread seen message IDs and initialization flag.

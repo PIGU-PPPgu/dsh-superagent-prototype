@@ -5,6 +5,7 @@ import { z } from 'zod'
 import type { CodexObservation } from '../../codex/model.ts'
 import type { CodexMonitor } from '../codex-monitor.ts'
 import type { CodexControl } from '../codex-control.ts'
+import { KV } from '../../kv.ts'
 import { UserError, followupOwners, key, reasonText, type Decision, type DecisionKind, type EngineForMainSession, type EngineForPeople }
   from '../../core/index.ts'
 import { IM_WORDS, NOTE_WORDS, wordCount } from '../../infra/text.ts'
@@ -23,7 +24,7 @@ const RoutingNoteSchema = z.string().trim()
 export interface MainToolsHost {
   readonly context: Context
   readonly engine: Pick<EngineForMainSession, 'decide' | 'attach' | 'reply' | 'requestStatus' | 'note'> & EngineForPeople
-  readonly store: Pick<Store, 'tickets' | 'triggers' | 'threads' | 'atomic' | 'replyStatus' | 'settings'>
+  readonly store: Pick<Store, 'tickets' | 'triggers' | 'threads' | 'decisions' | 'atomic' | 'replyStatus' | 'settings' | 'set'>
   readonly prompts: Pick<Prompts, 'preview' | 'save'>
   readonly sessions: Pick<Sessions, 'status' | 'notify' | 'delivery' | 'modelRetry'>
   readonly settings: Pick<Settings, 'view' | 'block' | 'save' | 'pause' | 'sync'>
@@ -31,9 +32,10 @@ export interface MainToolsHost {
   readonly resources: ResourceHost
   /** Optional, read-only view of allowlisted external Codex threads. */
   readonly codex?: { refresh(signal: AbortSignal): Promise<CodexObservation> }
-  readonly codexMonitor: Pick<CodexMonitor, 'routeHead' | 'readHistory'>
+  readonly codexMonitor: Pick<CodexMonitor, 'view' | 'routeHead' | 'readHistory' | 'handoffDecision'>
   readonly codexDesktopStatus?: (threadId: string, signal: AbortSignal) => Promise<Record<string, unknown>>
-  readonly codexControl: Pick<CodexControl, 'view' | 'enqueue' | 'reorder' | 'cancel'>
+  readonly codexControl: Pick<CodexControl, 'view' | 'enqueue' | 'reorder' | 'cancel' | 'forTicket'>
+  requestCodexDelivery?(): void
   /** Schedules a pass to carry out work queued by an Engine command (such as an Eval or ticket resume). */
   requestPass(): void
   sendReplies(): Promise<void>
@@ -89,16 +91,96 @@ function invalid(item: RouteItem): string | undefined {
   return undefined
 }
 type Routed = { decision?: DecisionKind; reason: string; ticketId?: string | undefined; triggerIds?: readonly string[] }
+const isCodexCandidate = (host: MainToolsHost, triggerId: string): boolean =>
+  host.store.triggers.get(triggerId)?.source === 'codex'
+  && host.store.triggers.get(triggerId)?.meta.codexAutoIntake === true
+
+async function codexRoute(host: MainToolsHost, item: RouteItem, signal: AbortSignal): Promise<Routed | { refused: string }> {
+  const trigger = host.store.triggers.get(item.trigger_id)
+  if (!trigger || typeof trigger.meta.threadId !== 'string') return { refused: 'Codex handoff candidate is unavailable' }
+  const threadId = trigger.meta.threadId
+  const ticketForThread = () => host.store.tickets.open().find(ticket => {
+    const origin = host.store.triggers.get(ticket.origin.triggerId)
+    return origin?.source === 'codex' && origin.meta.threadId === threadId
+  })
+  if (item.kind === 'ignore') {
+    return host.store.atomic(() => {
+      const decision = host.quietly(() => host.engine.decide(item.trigger_id, { kind: 'ignore', reason: item.reason! }))
+      host.codexMonitor.handoffDecision(item.trigger_id, { kind: 'ignore' })
+      return { ...fromDecision(decision), triggerIds: decision.triggerIds }
+    })
+  }
+  if (item.kind === 'stop') return { refused: 'Codex candidates do not stop a ticket through this route' }
+  const acceptedId = host.store.triggers.disposition(item.trigger_id)?.decisionId
+  const accepted = acceptedId ? host.store.decisions.get(acceptedId) : undefined
+  if (item.kind === 'accept' && accepted?.kind === 'accept' && accepted.ticketId) {
+    return { ...fromDecision(accepted), reason: `Already accepted as ${accepted.ticketId}; title and acknowledgement unchanged`,
+      triggerIds: accepted.triggerIds }
+  }
+  if (!host.codexDesktopStatus) return { refused: 'Codex Desktop status adapter is unavailable' }
+  const head = host.codexMonitor.routeHead(threadId)
+  const desktop = await host.codexDesktopStatus(threadId, signal)
+  if (!head?.present || head.archived || !head.ready || head.needsYou
+    || !desktop.available || desktop.status !== 'idle' || desktop.pendingRequests !== 0) {
+    return { refused: 'Codex conversation is not verified idle; defer this candidate' }
+  }
+  const history = await host.codexMonitor.readHistory(threadId, 1, signal)
+  if (!head.lastItemId || history.headItemId !== head.lastItemId) {
+    return { refused: 'Codex history changed; wait for a fresh monitor scan' }
+  }
+  signal.throwIfAborted()
+  const kind = item.kind
+  // Ticket ownership, Engine routing and the monitor relation commit under the bridge's exclusive claim lock.
+  return host.codexControl.forTicket(threadId, () => host.store.atomic(() => {
+    const note = item.note ? { note: item.note } : {}
+    switch (kind) {
+      case 'accept': {
+        const before = host.store.triggers.disposition(item.trigger_id)?.decisionId
+        const previous = before ? host.store.decisions.get(before) : undefined
+        if (previous?.kind === 'accept' && previous.ticketId) {
+          host.codexMonitor.handoffDecision(item.trigger_id, { kind: 'accept', ticketId: previous.ticketId })
+          return { ...fromDecision(previous), reason: `Already accepted as ${previous.ticketId}; title and acknowledgement unchanged`,
+            triggerIds: previous.triggerIds }
+        }
+        if (ticketForThread()) return { refused: 'An active DSH Ticket already owns this Codex conversation' }
+        const condition = trigger.meta.stage === 'blocked' ? 'technical blockage' : 'failure'
+        const scope = trigger.meta.workspaceMode === 'execute'
+          ? `Investigate the reported Codex ${condition} in ${String(trigger.meta.repository ?? 'its repository')} and complete the bounded repair in this ticket's isolated checkout.`
+          : `Investigate the reported Codex ${condition} in this ticket's isolated workspace and report a diagnosis.`
+        const decision = host.quietly(() => host.engine.decide(item.trigger_id, { kind: 'accept', title: item.title!, scope,
+          reason: { code: 'explicitRouted' }, acknowledgement: item.acknowledgement!, name: item.worktree_name!, ...note }))
+        if (decision.kind !== 'accept' || !decision.ticketId) return { refused: `Ticket was not created: ${reasonText(decision.reason)}` }
+        host.codexMonitor.handoffDecision(item.trigger_id, { kind: 'accept', ticketId: decision.ticketId })
+        host.store.set(KV.codex.handoff(threadId), { itemId: String(trigger.meta.itemId), ticketId: decision.ticketId,
+          at: decision.at })
+        return { ...fromDecision(decision), ...(decision.id === before
+          ? { reason: `Already accepted as ${decision.ticketId}; title and acknowledgement unchanged` } : {}),
+          triggerIds: decision.triggerIds }
+      }
+      case 'attach': {
+        const ticket = host.store.tickets.get(item.ticket_id!)
+        const active = ticketForThread()
+        if (!ticket || !active || ticket.id !== active.id) return { refused: 'Attach the active DSH Ticket that owns this Codex conversation' }
+        const attached = host.quietly(() => host.engine.attach(ticket.id, item.trigger_id, item.note ?? undefined))
+        host.codexMonitor.handoffDecision(item.trigger_id, { kind: 'attach', ticketId: attached.id })
+        host.store.set(KV.codex.handoff(threadId), { itemId: String(trigger.meta.itemId), ticketId: attached.id, at: attached.updatedAt })
+        return { reason: 'Attached: the ticket follows the trigger\'s thread and receives the trigger', ticketId: attached.id }
+      }
+    }
+  }))
+}
 /**
  * Carry out one routing decision as its Engine command, in a transaction of its own. `decided` holds the Triggers that this
  * call's earlier items decided, with their batches.
  */
-function route(host: MainToolsHost, item: RouteItem, decided: ReadonlyMap<string, string>): Routed | { refused: string } {
+async function route(host: MainToolsHost, item: RouteItem, decided: ReadonlyMap<string, string>,
+  signal: AbortSignal): Promise<Routed | { refused: string }> {
   const note = item.note ? { note: item.note } : {}
   // A Trigger an earlier item decided went with that item's Decision, also as a member of its batch.
   // A stop of it for another ticket is the Engine's to judge.
   const earlier = decided.get(item.trigger_id)
   if (earlier && item.kind === 'ignore') return { refused: `Decided in this call with ${earlier}, whose Decision took its batch` }
+  if (isCodexCandidate(host, item.trigger_id)) return codexRoute(host, item, signal)
   switch (item.kind) {
     case 'accept': {
       const before = host.store.triggers.disposition(item.trigger_id)?.decisionId
@@ -135,14 +217,14 @@ function routeTool(host: MainToolsHost): Tool {
     name: 'orchestrator_route',
     description: 'Route candidates, one item each by the card\'s trigger_id, in one call: accept an explicit request as a new ticket, attach a trigger to an existing ticket, stop a ticket on a person\'s stop message, or ignore a candidate that needs no ticket or stop, as dispatch says. Items run in order and each is answered on its own; a refused item leaves the others. An inferred candidate may be ignored here; accepting one goes through orchestrator_eval_decide.',
     schema: z.object({ decisions: z.array(RouteItemSchema).min(1).max(20) }).strict(),
-    execute: async ({ decisions }) => {
+    execute: async ({ decisions }, signal) => {
       const decided = new Map<string, string>()
-      const results = decisions.map(item => {
+      const one = async (item: RouteItem) => {
         const head = { trigger_id: item.trigger_id, kind: item.kind }
         const problem = invalid(item)
         if (problem) return { ...head, refused: problem }
         try {
-          const result = route(host, item, decided)
+          const result = await route(host, item, decided, signal)
           if ('refused' in result) return { ...head, ...result }
           for (const id of result.triggerIds ?? []) if (!decided.has(id)) decided.set(id, item.trigger_id)
           const ticket = result.ticketId ? host.store.tickets.get(result.ticketId) : undefined
@@ -153,7 +235,9 @@ function routeTool(host: MainToolsHost): Tool {
           host.context.logger.warn('dsh-superagent could not route trigger %s: %s', item.trigger_id, String(error))
           return { ...head, refused: `Not recorded: ${error instanceof Error ? error.message : String(error)}; retry this item` }
         }
-      })
+      }
+      const results = []
+      for (const item of decisions) results.push(await one(item))
       host.requestPass()
       return { results }
     },
@@ -167,12 +251,24 @@ function codexRouteTool(host: MainToolsHost): Tool {
   }
   return tool({
     name: 'orchestrator_codex_route',
-    description: 'Read Codex history or Desktop owner status; queue, reorder or cancel native follow-ups. History complete=false may omit earlier messages. Never approve requests.',
-    schema: z.object({ operation: z.enum(['head', 'history', 'status', 'followup', 'reorder', 'cancel']), thread_id: z.string().optional(),
+    description: 'Inspect Codex history/status and route existing chats. Never approve.',
+    schema: z.object({ operation: z.enum(['list', 'head', 'history', 'status', 'followup', 'interrupt', 'reorder', 'cancel']), thread_id: z.string().optional(),
       base_item_id: z.string().optional(), intent_id: z.string().optional(), reason: z.string().trim().min(1).max(300).optional(),
+      active_turn_id: z.uuid().optional(),
       message: z.string().trim().min(1).max(500).optional(),
-      priority: z.number().int().min(0).max(3).optional(), limit: z.number().int().min(1).max(12).optional() }).strict(),
+      priority: z.number().int().min(0).max(3).optional(), offset: z.number().int().min(0).optional(),
+      limit: z.number().int().min(1).max(12).optional() }).strict(),
     execute: async (args, signal) => {
+      if (args.operation === 'list') {
+        const page = host.codexMonitor.view(args.offset ?? 0, args.limit ?? 12, 'all')
+        return { source: 'persisted Codex history', ...(page.scannedAt ? { asOf: page.scannedAt } : {}),
+          enabled: page.enabled, total: page.total,
+          items: page.threads.map(row => ({ threadId: row.id, title: row.title.slice(0, 100), archived: row.archived,
+            ...(row.summary ? { summary: row.summary.slice(0, 300) } : {}), ...(row.stage ? { stage: row.stage } : {}),
+            ...(row.handoffTicketId ? { ticket: { source: 'DSH ticket state', id: row.handoffTicketId,
+              ...(row.handoffStage ? { stage: row.handoffStage } : {}) } } : {}) })),
+          ...(page.nextOffset === undefined ? {} : { nextOffset: page.nextOffset }) }
+      }
       if (args.operation === 'head') return { head: host.codexMonitor.routeHead(need(args.thread_id, 'thread_id')) ?? null,
         control: host.codexControl.view() }
       if (args.operation === 'history') return host.codexMonitor.readHistory(need(args.thread_id, 'thread_id'), args.limit ?? 8, signal)
@@ -185,6 +281,7 @@ function codexRouteTool(host: MainToolsHost): Tool {
       if (args.operation === 'cancel') return { intent: host.codexControl.cancel(need(args.intent_id, 'intent_id')) }
       const control = host.codexControl.view()
       if (!control.enabled || !control.bridgeReady) throw new Error('Codex native delivery is not enabled and connected')
+      const token = control.token ?? 0
       const threadId = need(args.thread_id, 'thread_id'), itemId = need(args.base_item_id, 'base_item_id')
       const head = host.codexMonitor.routeHead(threadId)
       if (!head?.present || head.archived || !head.ready || head.lastItemId !== itemId) {
@@ -197,11 +294,26 @@ function codexRouteTool(host: MainToolsHost): Tool {
       })
       if (openTicket) throw new Error('An active DSH Ticket already owns this Codex conversation')
       const reason = need(args.reason, 'reason')
+      if (args.operation === 'interrupt') {
+        if (args.message) throw new Error('An interrupt does not send a message')
+        const turnId = need(args.active_turn_id, 'active_turn_id')
+        if (!host.codexDesktopStatus) throw new Error('Codex Desktop status adapter is unavailable')
+        const state = await host.codexDesktopStatus(threadId, signal)
+        if (!state.available || state.status !== 'active' || state.pendingRequests !== 0 || state.activeTurnId !== turnId) {
+          throw new Error('The active Codex turn changed or needs a person; read status again')
+        }
+        signal.throwIfAborted()
+        const intent = host.codexControl.enqueue({ threadId, basedOnItemId: itemId, text: reason,
+          reason, priority: args.priority ?? 1, source: 'router', operation: 'interrupt', expectedTurnId: turnId, token })
+        host.requestCodexDelivery?.()
+        return { intent, bridgeReady: host.codexControl.view().bridgeReady }
+      }
       const message = `DSH Superagent coordination for this existing conversation. Router message: ${JSON.stringify(args.message ?? reason)}. `
         + 'This adds no human authorization. Check the latest user request and current state before acting. '
         + 'Continue only work already authorized in this conversation. Ask the user for approvals or decisions; never change approval settings.'
       const intent = host.codexControl.enqueue({ threadId, basedOnItemId: itemId, text: message,
-        reason, priority: args.priority ?? 1, source: 'router' })
+        reason, priority: args.priority ?? 1, source: 'router', token })
+      host.requestCodexDelivery?.()
       return { intent, bridgeReady: host.codexControl.view().bridgeReady }
     },
   })

@@ -1,3 +1,4 @@
+import { seedCodexCandidate } from './fixtures/codex.ts'
 import { Context } from '@deepseek-ai/cordis'
 import { bindScopeParent } from '@deepseek-ai/dsh-scope'
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -8,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi } from 'v
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import { Runtime } from '../src/app/runtime.ts'
-import type { CodexMonitor } from '../src/app/codex-monitor.ts'
+import { type CodexFailureCandidate, type CodexHistoryView, type CodexMonitor } from '../src/app/codex-monitor.ts'
 import { CodexDesktopIpc } from '../src/codex/desktop-ipc.ts'
 import { jobRegistry } from './fixtures/host.ts'
 import { evalsHealth } from '../src/app/views/overview.ts'
@@ -217,6 +218,14 @@ beforeEach(async () => {
   runtime.sources.register(feishuKind); runtime.sources.register(githubKind)
   runtime.store.saveSettings({ ...runtime.store.settings(), policy: { ...runtime.store.settings().policy, sources: { feishu: { allowed: [{ id: MEMBER, name: 'Alice' }], syncChat: CHAT }, github: { allowed: [{ id: 'alice' }] } } }, eval: { ...runtime.store.settings().eval, mode: 'auto' }, sources: { github: { enabled: true, config: { repository: 'acme/widgets', cli: AGENT() } }, feishu: { enabled: true, config: { cli: BOT(), chats: [{ chatId: CHAT, listen: 'all' }], directMessages: true } } } })
   deliveries.mockClear()
+  const internal = runtime as unknown as {
+    codexMonitor: CodexMonitor
+    codexDesktopStatus(threadId: string, signal: AbortSignal): Promise<Record<string, unknown>>
+  }
+  vi.spyOn(internal.codexMonitor, 'readHistory').mockImplementation(async (threadId, limit) =>
+    ({ threadId, title: threadId, source: 'persisted Codex history', readAt: new Date().toISOString(), complete: true,
+      headItemId: internal.codexMonitor.routeHead(threadId)?.lastItemId, messages: [] }) satisfies CodexHistoryView)
+  vi.spyOn(internal, 'codexDesktopStatus').mockResolvedValue({ available: true, status: 'idle', pendingRequests: 0 })
 })
 afterEach(async () => { expect(controller.prompt).not.toHaveBeenCalled(); await runtime?.stop(); vi.restoreAllMocks(); rmSync(directory, { recursive: true, force: true }) })
 
@@ -244,16 +253,28 @@ it('relays an explicit member mention as a candidate and creates the ticket, ack
   expect(await route({ kind: 'accept', trigger_id: trigger.id, title: 'again', worktree_name: worktreeName, acknowledgement: 'x' })).toMatchObject({ ticket: { ticket_id: ticket.id } })
 })
 
+async function acceptCodexCandidate(candidate: CodexFailureCandidate): Promise<string> {
+  seedCodexCandidate(runtime.store, candidate.threadId, candidate.itemId)
+  const triggerId = key('codex-handoff', candidate.threadId, candidate.itemId)
+  const workspaceMode = candidate.repository === 'acme/widgets' ? 'execute' : 'analysis'
+  runtime.receive({ id: triggerId, source: 'codex', threads: [{ source: 'codex', id: key('codex-intake', candidate.threadId, candidate.itemId) }],
+    actor: { source: 'codex', id: 'local-codex-monitor' }, human: false, addressed: 'direct', at: new Date().toISOString(),
+    text: JSON.stringify({ kind: 'Codex historical failure', threadId: candidate.threadId, evidence: candidate.evidence }),
+    meta: { threadId: candidate.threadId, itemId: candidate.itemId, codexAutoIntake: true,
+      repository: candidate.repository, githubBinding: workspaceMode === 'execute' ? 'default' : 'unavailable', workspaceMode } })
+  await runtime.idle()
+  const accepted = await route({ kind: 'accept', trigger_id: triggerId, title: 'Codex recovery',
+    worktree_name: 'codex-recovery', acknowledgement: 'Investigating the failure.' })
+  return (accepted.ticket as { ticket_id: string }).ticket_id
+}
+
 it('accepts a Codex failure once, routes later evidence to its ticket, and isolates an unbound repository', async () => {
-  const accept = (runtime as unknown as { acceptCodexFailure: (candidate: {
-    threadId: string; itemId: string; title: string; summary: string; evidence: string; repository?: string;
-    messages: { role: 'user' | 'assistant'; text: string }[] }, signal: AbortSignal) => Promise<string> })
-    .acceptCodexFailure.bind(runtime)
+  const accept = acceptCodexCandidate
   const candidate = { threadId: 'codex-thread-a', itemId: 'assistant-1', title: 'Build failed',
     summary: 'Build failed during verification', evidence: 'The build failed', repository: 'acme/widgets',
     messages: [{ role: 'assistant' as const, text: 'The build failed' }] }
-  const ticketId = await accept(candidate, new AbortController().signal)
-  expect(await accept(candidate, new AbortController().signal)).toBe(ticketId)
+  const ticketId = await accept(candidate)
+  expect(await accept(candidate)).toBe(ticketId)
   const ticket = runtime.store.tickets.get(ticketId)!
   expect(runtime.store.tickets.list()).toHaveLength(1)
   expect(ticket.mandate.basis.via).toBe('codex-auto')
@@ -263,21 +284,112 @@ it('accepts a Codex failure once, routes later evidence to its ticket, and isola
   expect(Object.fromEntries(runtime.ticketEnvironment(ticket).map(row => [row.key, row.value])))
     .toMatchObject({ DSH_SUPERAGENT_GITHUB_REPOSITORY: 'acme/widgets' })
 
-  const continued = await accept({ ...candidate, itemId: 'assistant-2', evidence: 'The retry failed',
-    messages: [{ role: 'assistant', text: 'The retry failed' }] }, new AbortController().signal)
-  expect(continued).toBe(ticketId)
+  const itemId = 'assistant-2'
+  seedCodexCandidate(runtime.store, candidate.threadId, itemId)
+  const triggerId = key('codex-handoff', candidate.threadId, itemId)
+  runtime.receive({ id: triggerId, source: 'codex', threads: [{ source: 'codex', id: key('codex-intake', candidate.threadId, itemId) }],
+    actor: { source: 'codex', id: 'local-codex-monitor' }, human: false, addressed: 'direct', at: new Date().toISOString(),
+    text: 'The retry failed', meta: { threadId: candidate.threadId, itemId, codexAutoIntake: true } })
+  await route({ kind: 'attach', trigger_id: triggerId, ticket_id: ticketId, note: 'New failure evidence.' })
   expect(runtime.store.tickets.list()).toHaveLength(1)
   expect(runtime.store.tickets.get(ticketId)?.inputs.filter(input => input.kind === 'trigger')).toHaveLength(1)
 
   const diagnostic = await accept({ ...candidate, threadId: 'codex-thread-b', itemId: 'assistant-3',
-    repository: 'another/project' }, new AbortController().signal)
+    repository: 'another/project' })
   const diagnosticTicket = runtime.store.tickets.get(diagnostic)!
   expect(runtime.store.triggers.get(diagnosticTicket.origin.triggerId)?.meta).toMatchObject({
     githubBinding: 'unavailable', workspaceMode: 'analysis' })
   expect(Object.fromEntries(runtime.ticketEnvironment(diagnosticTicket).map(row => [row.key, row.value])))
     .toMatchObject({ DSH_SUPERAGENT_GITHUB_REPOSITORY: '', DSH_SUPERAGENT_GITHUB_ACCOUNT: '' })
   expect(runtime.store.db.prepare('SELECT count(*) AS n FROM outbox').get()).toMatchObject({ n: 0 })
-  expect(relays(runtime.masterId)).toEqual([])
+  expect(relays(runtime.masterId).filter(item => item.kind === 'candidate')).toHaveLength(3)
+})
+
+it('intakes a safe Codex failure as a main-Session candidate before creating any ticket', async () => {
+  const candidate: CodexFailureCandidate = { threadId: 'codex-main-session', itemId: 'assistant-1', title: 'Build failed',
+    summary: 'Build failed during verification', evidence: 'The build failed', repository: 'acme/widgets',
+    messages: [{ role: 'assistant', text: 'The build failed' }] }
+  seedCodexCandidate(runtime.store, candidate.threadId, candidate.itemId)
+  const internal = runtime as unknown as {
+    codexDesktopStatus(threadId: string, signal: AbortSignal): Promise<Record<string, unknown>>
+    intakeCodexFailure(candidate: CodexFailureCandidate, signal: AbortSignal): Promise<{ triggerId: string } | { waiting: true }>
+  }
+  vi.spyOn(internal, 'codexDesktopStatus').mockResolvedValue({ available: true, status: 'idle', pendingRequests: 0 })
+  const intake = await internal.intakeCodexFailure(candidate, new AbortController().signal)
+  if (!('triggerId' in intake)) throw new Error('Expected a persisted trigger')
+  expect(runtime.store.tickets.list()).toEqual([])
+  expect(runtime.store.triggers.get(intake.triggerId)).toMatchObject({
+    source: 'codex', human: false, threads: [{ source: 'codex', id: key('codex-intake', candidate.threadId, candidate.itemId) }],
+    meta: { codexAutoIntake: true, threadId: candidate.threadId, itemId: candidate.itemId } })
+  await runtime.idle()
+  expect(relays(runtime.masterId).filter(item => item.kind === 'candidate')).toEqual([
+    expect.objectContaining({ trigger_id: intake.triggerId, strength: 'explicit', text: expect.stringContaining('The build failed') }),
+  ])
+  const accepted = await route({ kind: 'accept', trigger_id: intake.triggerId, title: 'Codex recovery',
+    worktree_name: 'codex-recovery', acknowledgement: 'Investigating the failure.' })
+  const ticketId = (accepted.ticket as { ticket_id: string }).ticket_id
+  expect(runtime.store.get(KV.codex.handoff(candidate.threadId))).toMatchObject({ itemId: candidate.itemId, ticketId })
+  const monitor = (runtime as unknown as { codexMonitor: CodexMonitor }).codexMonitor
+  expect(monitor.view().managed.map(row => row.handoffTicketId)).toEqual([ticketId])
+  expect(await route({ kind: 'accept', trigger_id: intake.triggerId, title: 'Again',
+    worktree_name: 'codex-recovery', acknowledgement: 'Same.' })).toMatchObject({ ticket: { ticket_id: ticketId },
+    reason: expect.stringContaining('Already accepted') })
+  expect(runtime.store.tickets.list()).toHaveLength(1)
+})
+
+it('holds Codex intake while Desktop is active, pending, not loaded or unknown', async () => {
+  const candidate: CodexFailureCandidate = { threadId: 'codex-waiting', itemId: 'assistant-1', title: 'Build failed',
+    summary: 'Build failed', evidence: 'Build failed', messages: [] }
+  seedCodexCandidate(runtime.store, candidate.threadId, candidate.itemId)
+  const internal = runtime as unknown as {
+    codexDesktopStatus(threadId: string, signal: AbortSignal): Promise<Record<string, unknown>>
+    intakeCodexFailure(candidate: CodexFailureCandidate, signal: AbortSignal): Promise<{ triggerId: string } | { waiting: true }>
+  }
+  const status = vi.spyOn(internal, 'codexDesktopStatus')
+  for (const desktop of [{ available: true, status: 'active', pendingRequests: 0 },
+    { available: true, status: 'idle', pendingRequests: 1 }, { available: true, status: 'notLoaded', pendingRequests: 0 },
+    { available: false }, { available: true, status: 'unknown', pendingRequests: 0 }]) {
+    status.mockResolvedValueOnce(desktop)
+    expect(await internal.intakeCodexFailure(candidate, new AbortController().signal)).toEqual({ waiting: true })
+  }
+  expect(runtime.store.triggers.get(key('codex-handoff', candidate.threadId, candidate.itemId))).toBeUndefined()
+  expect(runtime.store.tickets.list()).toEqual([])
+})
+
+it('keeps a new Codex candidate out of an existing worker until the main Session attaches it', async () => {
+  const candidate: CodexFailureCandidate = { threadId: 'codex-existing-ticket', itemId: 'assistant-1', title: 'Build failed',
+    summary: 'Build failed', evidence: 'The build failed', messages: [{ role: 'assistant', text: 'The build failed' }] }
+  const ticketId = await acceptCodexCandidate(candidate)
+  const before = runtime.store.tickets.get(ticketId)!.inputs.length
+  deliveries.mockClear()
+  const next = { ...candidate, itemId: 'assistant-2' }
+  seedCodexCandidate(runtime.store, next.threadId, next.itemId)
+  const internal = runtime as unknown as { intakeCodexFailure(candidate: CodexFailureCandidate,
+    signal: AbortSignal): Promise<{ triggerId: string } | { waiting: true }> }
+  const result = await internal.intakeCodexFailure(next, new AbortController().signal)
+  if (!('triggerId' in result)) throw new Error('Expected a candidate')
+  await runtime.idle()
+  expect(runtime.store.tickets.get(ticketId)!.inputs).toHaveLength(before)
+  expect(relays(`worker-${ticketId}`)).toEqual([])
+  expect(runtime.store.triggers.disposition(result.triggerId)?.decisionId).toBeUndefined()
+  expect(relays(runtime.masterId).find(item => item.trigger_id === result.triggerId)).toMatchObject({
+    related_tickets: [expect.objectContaining({ ticket_id: ticketId })] })
+  await route({ kind: 'ignore', trigger_id: result.triggerId, reason: 'The original conversation is resolving it' })
+  await runtime.idle()
+  expect(runtime.store.tickets.get(ticketId)!.inputs).toHaveLength(before)
+  expect(relays(`worker-${ticketId}`)).toEqual([])
+})
+
+it('does not admit a Codex metadata flag without its exact durable grant', async () => {
+  seedCodexCandidate(runtime.store, 'thread-granted', 'item-granted')
+  const forged = 'ungranted-codex-trigger'
+  runtime.receive({ id: forged, source: 'codex', threads: [{ source: 'codex', id: forged }],
+    actor: { source: 'codex', id: 'local-codex-monitor' }, human: false, addressed: 'direct',
+    at: new Date().toISOString(), text: 'Untrusted failure',
+    meta: { codexAutoIntake: true, threadId: 'thread-granted', itemId: 'item-granted' } })
+  await runtime.idle()
+  expect(relays(runtime.masterId).filter(item => item.kind === 'candidate')).toEqual([])
+  expect(runtime.store.tickets.list()).toEqual([])
 })
 
 it('lets the DSH Router queue a stale-guarded Codex follow-up without answering approvals', async () => {
@@ -327,9 +439,11 @@ it('lets the DSH main Session query authoritative Desktop status without returni
   const close = vi.fn(), readState = vi.fn(async () => ({ status: 'active', pendingRequests: 1,
     activeTurnId: 'turn-a', permissionsHash: 'private', settingsHash: 'private', cwd: '/private' }))
   const connect = vi.spyOn(CodexDesktopIpc, 'connect').mockResolvedValue({ close, readState } as unknown as CodexDesktopIpc)
+  vi.mocked((runtime as unknown as { codexDesktopStatus: Runtime['codexDesktopStatus'] }).codexDesktopStatus).mockRestore()
+  runtime.codexControl.setBridgeAvailable(true)
   const result = await runTool(runtime.masterId, 'orchestrator_codex_route', { operation: 'status', thread_id: 'thread-a' })
   expect(result).toMatchObject({ source: 'Codex Desktop owner', available: true, status: 'active',
-    activeTurnId: 'turn-a', pendingRequests: 1 })
+    activeTurnId: 'turn-a', pendingRequests: 1, messaging: { enabled: false, connected: true } })
   expect(JSON.stringify(result)).not.toContain('private')
   expect(close).toHaveBeenCalledOnce()
   await expect(runTool(runtime.masterId, 'orchestrator_codex_route', { operation: 'status', thread_id: 'unknown' }))
@@ -337,14 +451,26 @@ it('lets the DSH main Session query authoritative Desktop status without returni
   expect(connect).toHaveBeenCalledOnce()
 })
 
+it('lets the DSH main Session page through every stored main conversation without exposing message bodies', async () => {
+  runtime.store.set('codex-monitor-v1', { version: 1, enabled: true, initialized: true, threads:
+    Object.fromEntries(Array.from({ length: 13 }, (_, index) => [`thread-${index}`, {
+      id: `thread-${index}`, name: `Task ${index}`, sourceKind: 'vscode', present: true, archived: index === 12,
+      seenAt: '', context: [{ id: 'private-message', role: 'assistant', text: 'Private body not in inventory' }],
+    }])) })
+  const first = await runTool(runtime.masterId, 'orchestrator_codex_route', { operation: 'list', limit: 12 })
+  expect(first).toMatchObject({ source: 'persisted Codex history', total: 13, nextOffset: 12 })
+  expect(first.items).toHaveLength(12)
+  const last = await runTool(runtime.masterId, 'orchestrator_codex_route', { operation: 'list', offset: first.nextOffset, limit: 12 })
+  expect(last.items).toHaveLength(1)
+  expect(last.nextOffset).toBeUndefined()
+  expect(JSON.stringify(first) + JSON.stringify(last)).not.toContain('Private body')
+})
+
 it('keeps a Codex conversation with an active DSH Ticket out of the native route queue', async () => {
   const candidate = { threadId: 'thread-owned', itemId: 'assistant-owned', title: 'Build failed',
     summary: 'Build failed', evidence: 'Build failed', repository: 'acme/widgets',
     messages: [{ role: 'assistant' as const, text: 'Build failed' }] }
-  const internal = runtime as unknown as {
-    acceptCodexFailure(value: typeof candidate, signal: AbortSignal): Promise<string>
-  }
-  const ticketId = await internal.acceptCodexFailure(candidate, new AbortController().signal)
+  const ticketId = await acceptCodexCandidate(candidate)
   expect(runtime.store.tickets.get(ticketId)?.ended).toBeUndefined()
   runtime.store.set('codex-monitor-v1', { version: 1, enabled: true, initialized: true, threads: {
     [candidate.threadId]: { id: candidate.threadId, name: candidate.title, sourceKind: 'vscode', archived: false,
@@ -362,24 +488,29 @@ it('does not create a DSH Ticket alongside a pending native Codex follow-up', as
   const candidate = { threadId: 'thread-pending', itemId: 'assistant-new', title: 'Build failed',
     summary: 'Build failed', evidence: 'Build failed', repository: 'acme/widgets',
     messages: [{ role: 'assistant' as const, text: 'Build failed' }] }
-  const internal = runtime as unknown as {
-    acceptCodexFailure(value: typeof candidate, signal: AbortSignal): Promise<string>
-  }
+  seedCodexCandidate(runtime.store, candidate.threadId, candidate.itemId)
+  const triggerId = key('codex-handoff', candidate.threadId, candidate.itemId)
   runtime.codexControl.setEnabled(true)
   const queued = runtime.codexControl.enqueue({ threadId: candidate.threadId, basedOnItemId: 'assistant-old',
     text: 'Continue the task', reason: 'Router follow-up', source: 'router' })
-  const ticketId = await internal.acceptCodexFailure(candidate, new AbortController().signal)
+  const ticketId = await acceptCodexCandidate(candidate)
   expect(runtime.store.tickets.get(ticketId)?.ended).toBeUndefined()
   expect(runtime.codexControl.view().intents.find(intent => intent.id === queued.id)?.status).toBe('cancelled')
   const queue = JSON.parse(readFileSync(join(runtime.codexControl.directory, 'queue.json'), 'utf8')) as { actions: unknown[] }
   expect(queue.actions).toEqual([])
 
   const blocked = { ...candidate, threadId: 'thread-dispatching', itemId: 'assistant-blocked' }
+  seedCodexCandidate(runtime.store, blocked.threadId, blocked.itemId)
   const claimed = runtime.codexControl.enqueue({ threadId: blocked.threadId, basedOnItemId: 'assistant-old',
     text: 'Continue the task', reason: 'Router follow-up', source: 'router' })
   writeFileSync(join(runtime.codexControl.directory, 'receipts', `${claimed.id}.json`), JSON.stringify({ version: 1,
     intentId: claimed.id, threadId: blocked.threadId, status: 'dispatching', at: new Date().toISOString() }), { mode: 0o600 })
-  await expect(internal.acceptCodexFailure(blocked, new AbortController().signal)).rejects.toThrow('dispatching')
+  runtime.receive({ id: key('codex-handoff', blocked.threadId, blocked.itemId), source: 'codex',
+    threads: [{ source: 'codex', id: blocked.threadId }], actor: { source: 'codex', id: 'local-codex-monitor' },
+    human: false, addressed: 'direct', at: new Date().toISOString(), text: 'Build failed',
+    meta: { threadId: blocked.threadId, itemId: blocked.itemId, codexAutoIntake: true } })
+  await expect(route({ kind: 'accept', trigger_id: key('codex-handoff', blocked.threadId, blocked.itemId),
+    title: 'Codex recovery', worktree_name: 'codex-recovery', acknowledgement: 'Investigating.' })).rejects.toThrow('dispatching')
   expect(runtime.store.tickets.list().filter(ticket => runtime.store.triggers.get(ticket.origin.triggerId)
     ?.meta.threadId === blocked.threadId)).toEqual([])
   expect(runtime.codexControl.view().intents.find(intent => intent.id === claimed.id)?.status).toBe('dispatching')
@@ -1671,7 +1802,7 @@ it('refuses the main Session a bash command that runs sleep and a long job wait,
   const { sessionId } = await acceptedTicket()
   expect(guards.get(sessionId)!(bash('sleep 60'))).toBeUndefined()
   // The main Session's role says so.
-  expect(masterPrompt).toContain('Worker reports, follow_up notices, new candidates and a background job\'s end, with its output, arrive by themselves as messages')
+  expect(masterPrompt).toContain('Reports, follow_up notices, candidates and job results arrive automatically.')
 })
 
 it('reads the main Session\'s preset from a registry with or without presetForSession, and takes standard\'s caps when it cannot', async () => {

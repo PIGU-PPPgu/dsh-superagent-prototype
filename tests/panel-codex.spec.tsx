@@ -30,7 +30,7 @@ it('shows the DSH Router brief and keeps native control disabled until the bridg
   server.codex = { ...server.codex, enabled: true, total: 2, recentTotal: 2 }
   server.codexRouter = { mainTotal: 2, recentTotal: 2, childTotal: 3, childChecked: 2,
     needsYou: 1, technical: 0, managed: 1, priorities: [{ threadId: 'thread-a', title: '发布任务',
-      summary: '选择发布目标', kind: 'needsYou' }], recent: [] }
+      summary: '选择发布目标', kind: 'needsYou', source: 'persisted Codex history' }], recent: [] }
   await mount()
   await click(tab(zh['tab.codex']))
   expect(text()).toContain('路由简报')

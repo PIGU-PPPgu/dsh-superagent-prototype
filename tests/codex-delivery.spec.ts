@@ -17,6 +17,8 @@ function fixture() {
     revision: 0, status: 'idle', pendingRequests: 0, workspaceKind: 'project', permissionsKnown: true,
     permissionsHash: 'permissions', settingsHash: 'settings' }
   const client = { readState: vi.fn(async (_threadId: string, _signal?: AbortSignal) => state as CodexDesktopState | undefined), close: vi.fn(),
+    interruptTurn: vi.fn(async (_state: CodexDesktopState, _signal?: AbortSignal, _canSend?: () => boolean) => ({
+      turnId: 'turn-a', settingsPreserved: true as boolean | undefined })),
     startText: vi.fn(async (_state: CodexDesktopState, _text: string, id: string, _signal?: AbortSignal, _canSend?: () => boolean) => ({
       clientUserMessageId: id, turnId: 'turn-a', settingsPreserved: true as boolean | undefined })) }
   const monitor = { routeHead: vi.fn(() => ({ threadId: 'thread-a', title: 'Task', present: true,
@@ -44,6 +46,76 @@ it('probes while disabled and sends a DSH-authored intent once when enabled', as
   await test.delivery.request()
   expect(test.client.startText).toHaveBeenCalledOnce()
   expect(JSON.parse(test.relay.mock.calls[0]![1])).toMatchObject({ kind: 'codex_delivery', status: 'sent', settingsVerified: true })
+})
+
+it('interrupts only the exact active turn and never sends text as an interruption', async () => {
+  const test = fixture(); test.control.setEnabled(true)
+  const activeTurnId = '01a1a47c-b3c1-7282-9521-46fd3e44f1f0'
+  test.state.status = 'active'; test.state.activeTurnId = activeTurnId
+  const intent = test.control.enqueue({ threadId: 'thread-a', basedOnItemId: 'head-a', text: 'Reprioritize this task',
+    reason: 'DSH changed work priority', source: 'router', operation: 'interrupt', expectedTurnId: activeTurnId })
+  await test.delivery.request(); await test.delivery.request()
+  expect(test.client.interruptTurn).toHaveBeenCalledOnce()
+  expect(test.client.startText).not.toHaveBeenCalled()
+  expect(test.control.view().intents[0]).toMatchObject({ id: intent.id, status: 'sent' })
+  expect(JSON.parse(test.relay.mock.calls[0]![1])).toMatchObject({ status: 'interrupted', settingsVerified: true })
+})
+
+it('rejects an interrupt for a replaced turn and holds it for a human request', async () => {
+  const test = fixture(); test.control.setEnabled(true)
+  const expectedTurnId = '01a1a47c-b3c1-7282-9521-46fd3e44f1f0'
+  test.state.status = 'active'; test.state.activeTurnId = expectedTurnId; test.state.pendingRequests = 1
+  test.control.enqueue({ threadId: 'thread-a', basedOnItemId: 'head-a', text: 'Pause this work',
+    reason: 'DSH reprioritization', source: 'router', operation: 'interrupt', expectedTurnId })
+  await test.delivery.request()
+  expect(test.control.view().intents[0]?.status).toBe('queued')
+  test.state.pendingRequests = 0; test.state.activeTurnId = '01a1a47c-b3c1-7282-9521-46fd3e44f1f1'
+  await test.delivery.request()
+  expect(test.control.view().intents[0]).toMatchObject({ status: 'failed', error: 'stale-active-turn' })
+  expect(test.client.interruptTurn).not.toHaveBeenCalled()
+})
+
+it('can deliver to an idle conversation while an earlier conversation stays busy', async () => {
+  const test = fixture(); test.control.setEnabled(true)
+  const busy = test.enqueue()
+  test.control.reorder(busy.id, 3)
+  const later = test.control.enqueue({ threadId: 'thread-b', basedOnItemId: 'head-a', text: 'Report authorized progress',
+    reason: 'DSH status check', source: 'router' })
+  test.client.readState.mockImplementation(async threadId => ({ ...test.state, threadId,
+    status: threadId === busy.threadId ? 'active' : 'idle' }))
+  await test.delivery.request()
+  expect(test.control.view().intents.find(row => row.id === busy.id)?.status).toBe('queued')
+  expect(test.control.view().intents.find(row => row.id === later.id)?.status).toBe('sent')
+  expect(test.client.startText).toHaveBeenCalledOnce()
+})
+
+it('holds an unavailable owner, reconnects, and continues to another conversation', async () => {
+  const test = fixture(); test.control.setEnabled(true)
+  const held = test.enqueue(); test.control.reorder(held.id, 3)
+  const ready = test.control.enqueue({ threadId: 'thread-b', basedOnItemId: 'head-a', text: 'Report progress',
+    reason: 'DSH status check', source: 'router' })
+  test.client.readState.mockImplementation(async threadId => {
+    if (threadId === held.threadId) throw new CodexDesktopIpcError('request-timeout')
+    return { ...test.state, threadId }
+  })
+  await test.delivery.request()
+  expect(test.connect).toHaveBeenCalledTimes(2)
+  expect(test.control.view().intents.find(row => row.id === held.id)?.status).toBe('queued')
+  expect(test.control.view().intents.find(row => row.id === ready.id)?.status).toBe('sent')
+})
+
+it('visits conversations beyond a full batch of busy owners on the next pass', async () => {
+  const test = fixture(); test.control.setEnabled(true)
+  for (let index = 0; index < 9; index++) test.control.enqueue({ threadId: `busy-${index}`,
+    basedOnItemId: 'head-a', text: 'Report progress', reason: 'DSH check', source: 'router', priority: 3 })
+  const ready = test.control.enqueue({ threadId: 'thread-b', basedOnItemId: 'head-a', text: 'Report progress',
+    reason: 'DSH check', source: 'router', priority: 0 })
+  test.client.readState.mockImplementation(async threadId => ({ ...test.state, threadId,
+    status: threadId.startsWith('busy-') ? 'active' : 'idle' }))
+  await test.delivery.request()
+  expect(test.client.startText).not.toHaveBeenCalled()
+  await test.delivery.request()
+  expect(test.control.view().intents.find(row => row.id === ready.id)?.status).toBe('sent')
 })
 
 it('keeps active or approval-waiting conversations queued until idle', async () => {

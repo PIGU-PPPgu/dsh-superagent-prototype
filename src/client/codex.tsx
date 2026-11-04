@@ -103,7 +103,10 @@ export function CodexPage() {
           <div className="dt-row-meta"><span>{item.kind === 'needsYou' ? (chinese ? '需要你' : 'Needs you')
             : item.kind === 'ticketNeedsYou' ? (chinese ? 'DSH 工单待处理' : 'DSH ticket needs you')
               : item.kind === 'technical' ? (chinese ? '技术异常' : 'Technical issue')
-                : (chinese ? '子线程历史失败' : 'Child failure in history')}</span></div>
+                : item.kind === 'ticketEnded' ? (chinese ? '工单已结束' : 'Ticket ended')
+                  : item.kind === 'reportedComplete' ? (chinese ? '报告完成' : 'Reported complete')
+                    : item.kind === 'ticketResult' ? (chinese ? '工单结果' : 'Ticket result')
+                      : (chinese ? '子线程历史失败' : 'Child failure in history')}</span></div>
           {item.ticketId && <div className="dt-row-buttons"><Button variant="outline" size="sm"
             onClick={() => navigate({ page: 'execution', id: item.ticketId! })}>{chinese ? '查看工单' : 'Open ticket'}</Button></div>}
         </div></li>)}</ul> : <p className="dt-hint">{router?.recent.length
@@ -126,7 +129,9 @@ export function CodexPage() {
         <li className="dt-row" key={intent.id}><div className="dt-row-main">
           <strong>{intent.threadId}</strong>
           <p className="dt-row-quote dt-clamp">{intent.reason}</p>
-          <div className="dt-row-meta"><span>{intent.status}</span><span>{timeText(intent.updatedAt, chinese)}</span></div>
+          <div className="dt-row-meta"><span>{intent.operation === 'interrupt'
+            ? (chinese ? '中断' : 'Interrupt') : (chinese ? '后续消息' : 'Follow-up')}</span>
+            <span>{intent.status}</span><span>{timeText(intent.updatedAt, chinese)}</span></div>
         </div></li>)}</ul>}
     </section>}
 

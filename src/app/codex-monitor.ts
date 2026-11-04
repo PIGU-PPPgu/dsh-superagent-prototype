@@ -30,6 +30,8 @@ interface Attention { decision: CodexTriageDecision; at: string; itemId: string;
 interface Assessment { decision: CodexTriageDecision; at: string; itemId: string; issueKey?: string; version: 4 }
 interface ChildTurn { updatedAt?: string; checkedAt: string; turnId?: string; status?: string; error?: string }
 interface HandoffRecord { itemId: string; at: string; ticketId: string }
+interface AutoHandoffRecord { itemId: string; at: string; ticketId?: string; triggerId?: string; intentId?: string;
+  enabledAt?: string; ignoredAt?: string; error?: string }
 interface StoredThread extends MonitoredCodexThread {
   seenAt: string
   checkedAt?: string
@@ -47,8 +49,9 @@ interface StoredThread extends MonitoredCodexThread {
   autoHandoffBaselineItemId?: string
   autoHandoffFreshItemId?: string
   autoHandoffReadComplete?: boolean
-  autoHandoff?: { itemId: string; at: string; ticketId?: string; intentId?: string; error?: string }
+  autoHandoff?: AutoHandoffRecord
   handoffs?: HandoffRecord[]
+  autoHandoffRecords?: Record<string, AutoHandoffRecord>
   error?: string
 }
 interface StoredMonitor {
@@ -56,6 +59,7 @@ interface StoredMonitor {
   enabled: boolean
   autoHandoffEnabled?: boolean
   autoHandoffEnabledAt?: string
+  autoHandoffRevision?: number
   initialized: boolean
   scannedAt?: string
   error?: string
@@ -95,8 +99,10 @@ export interface CodexMonitorThreadView {
   error?: string
   attention?: Attention
   handoffTicketId?: string
+  handoffTriggerId?: string
   routeIntentId?: string
   handoffStage?: TicketStage
+  handoffReportId?: string
   handoffError?: string
 }
 export interface CodexMonitorView {
@@ -127,6 +133,7 @@ export interface CodexMonitorView {
 export interface CodexRouteHead {
   threadId: string
   lastItemId?: string
+  assessmentItemId?: string
   title: string
   summary?: string
   stage?: CodexTriageStage
@@ -174,6 +181,8 @@ export interface CodexFailureCandidate {
   repository?: string
   messages: { role: 'user' | 'assistant'; text: string }[]
 }
+export type CodexAutoHandoffResult = { triggerId: string } | { waiting: true }
+export type CodexHandoffDecision = { kind: 'accept' | 'attach'; ticketId: string } | { kind: 'ignore' }
 export interface CodexMonitorDeps {
   store: Pick<Store, 'get' | 'set' | 'settings' | 'tickets'>
   context: Pick<Context, 'llm' | 'sessionController'>
@@ -182,7 +191,7 @@ export interface CodexMonitorDeps {
   codexHome?: string
   pollMs?: number
   now?: () => Date
-  autoHandoff?: (candidate: CodexFailureCandidate, signal: AbortSignal) => Promise<string>
+  autoHandoff?: (candidate: CodexFailureCandidate, signal: AbortSignal) => Promise<CodexAutoHandoffResult>
   onScan?: () => void
 }
 
@@ -341,6 +350,7 @@ export class CodexMonitor {
       ...(row.error ? { error: row.error } : {}),
       ...(row.attention ? { attention: row.attention } : {}),
       ...(row.autoHandoff?.ticketId ? { handoffTicketId: row.autoHandoff.ticketId } : {}),
+      ...(row.autoHandoff?.triggerId ? { handoffTriggerId: row.autoHandoff.triggerId } : {}),
       ...(row.autoHandoff?.intentId ? { routeIntentId: row.autoHandoff.intentId } : {}),
       ...(row.autoHandoff?.ticketId && this.deps.store.tickets.get(row.autoHandoff.ticketId)
         ? { handoffStage: ticketStage(this.deps.store.tickets.get(row.autoHandoff.ticketId)!) } : {}),
@@ -355,12 +365,13 @@ export class CodexMonitor {
       const history = row.handoffs ?? (row.autoHandoff?.ticketId ? [row.autoHandoff as HandoffRecord] : [])
       return history.map(handoff => {
         const ticket = this.deps.store.tickets.get(handoff.ticketId)
-        const report = ticket?.assignments.at(-1)?.report
+        const assignment = ticket?.assignments.at(-1), report = assignment?.report
         const { summary: _currentSummary, ...rowView } = display(row)
         const summary = report?.summary ?? (handoff.itemId === row.assessment?.itemId ? row.assessment.decision.summary : undefined)
         return { ...rowView, title: ticket?.title ?? row.name ?? row.id,
           ...(summary ? { summary } : {}),
           handoffTicketId: handoff.ticketId,
+          ...(assignment && report ? { handoffReportId: key('codex-ticket-report', assignment.id, report.state, report.summary) } : {}),
           ...(ticket ? { handoffStage: ticketStage(ticket) } : {}),
           activityAt: ticket?.updatedAt ?? handoff.at }
       })
@@ -401,10 +412,45 @@ export class CodexMonitor {
     const state = this.state()
     const starting = enabled && !state.autoHandoffEnabled
     this.save({ ...state, autoHandoffEnabled: enabled,
+      autoHandoffRevision: (state.autoHandoffRevision ?? 0) + Number(enabled !== !!state.autoHandoffEnabled),
       ...(starting ? { autoHandoffEnabledAt: this.now().toISOString(),
         threads: Object.fromEntries(Object.entries(state.threads).map(([id, row]) =>
           [id, { ...row, autoHandoffBaselineItemId: row.lastItemId ?? '', autoHandoffFreshItemId: undefined }])) } : {}) })
     return this.view()
+  }
+  /** Revokes prior candidate grants even when disable and re-enable share a clock tick. */
+  handoffGeneration(): string | undefined {
+    const state = this.state()
+    return state.enabled && state.autoHandoffEnabled && state.autoHandoffEnabledAt
+      ? `${state.autoHandoffRevision ?? 0}:${state.autoHandoffEnabledAt}` : undefined
+  }
+  /** Reconcile a successful main-Session decision with the monitor's durable handoff history. */
+  handoffDecision(triggerId: string, decision: CodexHandoffDecision): void {
+    const state = this.state()
+    const found = Object.entries(state.threads).find(([, row]) => row.autoHandoff?.triggerId === triggerId
+      || row.autoHandoffRecords?.[triggerId])
+    if (!found) throw new Error('Codex handoff candidate is no longer current')
+    const [threadId, row] = found
+    const current = row.autoHandoffRecords?.[triggerId] ?? row.autoHandoff!
+    if (decision.kind === 'ignore') {
+      const ignored = { ...current, ignoredAt: current.ignoredAt ?? this.now().toISOString(), error: undefined }
+      this.commitThread(threadId, { ...row,
+        ...(row.autoHandoff?.triggerId === triggerId ? { autoHandoff: ignored } : {}),
+        autoHandoffRecords: { ...row.autoHandoffRecords, [triggerId]: ignored } })
+      return
+    }
+    if (current.ticketId === decision.ticketId) return
+    const fresh = state.enabled && state.autoHandoffEnabled && current.enabledAt === state.autoHandoffEnabledAt
+      && row.present && !row.archived && row.assessment?.itemId === current.itemId
+      && row.context.at(-1)?.id === current.itemId && row.context.at(-1)?.role === 'assistant'
+      && !row.userDecisionRequested && !row.error
+    if (!fresh || current.ignoredAt) throw new Error('Codex handoff candidate is stale or automatic intake is disabled')
+    const previous = row.autoHandoff
+    const history = row.handoffs ?? (previous?.ticketId ? [{ itemId: previous.itemId, at: previous.at, ticketId: previous.ticketId }] : [])
+    this.commitThread(threadId, { ...row, autoHandoff: { ...current, ticketId: decision.ticketId, error: undefined },
+      autoHandoffRecords: { ...row.autoHandoffRecords, [triggerId]: { ...current, ticketId: decision.ticketId, error: undefined } },
+      handoffs: history.some(handoff => handoff.ticketId === decision.ticketId)
+        ? history : [...history, { itemId: current.itemId, at: this.now().toISOString(), ticketId: decision.ticketId }] })
   }
   acknowledge(threadId: string, itemId: string, at: string): CodexMonitorView {
     const state = this.state()
@@ -647,6 +693,8 @@ export class CodexMonitor {
               ? { autoHandoffBaselineItemId: previous.autoHandoffBaselineItemId } : {}),
             ...(previous?.autoHandoff ? { autoHandoff: previous.autoHandoff } : {}),
             ...(previous?.handoffs ? { handoffs: previous.handoffs } : {}),
+      autoHandoffRecords: { ...previous?.autoHandoffRecords,
+        ...(previous?.autoHandoff?.triggerId ? { [previous.autoHandoff.triggerId]: previous.autoHandoff } : {}) },
             autoHandoffReadComplete: recent.complete,
             ...(this.state().autoHandoffEnabled && newAssistant && recent.complete
               && (previous?.baselined || candidate.updatedAt &&
@@ -702,7 +750,7 @@ export class CodexMonitor {
         || row.autoHandoffBaselineItemId === assessment.itemId
         || (row.autoHandoffBaselineItemId === undefined || row.autoHandoffBaselineItemId === '')
           && (!row.updatedAt || Date.parse(row.updatedAt) <= Date.parse(state.autoHandoffEnabledAt))
-        || previous?.itemId === assessment.itemId && (previous.ticketId || previous.intentId
+        || previous?.itemId === assessment.itemId && (previous.ticketId || previous.triggerId || previous.ignoredAt || previous.intentId
           || previous.error && Date.parse(this.now().toISOString()) - Date.parse(previous.at) < RESCAN_MS)) continue
       signal.throwIfAborted()
       const at = this.now().toISOString()
@@ -714,12 +762,11 @@ export class CodexMonitor {
           ...(row.context.at(-1)?.turnId ? { turnId: row.context.at(-1)?.turnId } : {}),
           ...(row.repository ? { repository: row.repository } : {}),
           messages: row.context.map(({ role, text }) => ({ role, text })) } satisfies CodexFailureCandidate
-        const ticketId = await handler(candidate, signal)
+        const result = await handler(candidate, signal)
         const current = this.state().threads[threadId] ?? row
-        const history = current.handoffs ?? (current.autoHandoff?.ticketId ? [current.autoHandoff as HandoffRecord] : [])
-        this.commitThread(threadId, { ...current, autoHandoff: { itemId: assessment.itemId, at, ticketId },
-          handoffs: history.some(handoff => handoff.ticketId === ticketId)
-            ? history : [...history, { itemId: assessment.itemId, at, ticketId }] })
+        if ('waiting' in result) continue
+        this.commitThread(threadId, { ...current, autoHandoff: { itemId: assessment.itemId, at,
+          triggerId: result.triggerId, enabledAt: state.autoHandoffEnabledAt, error: undefined } })
       } catch (error) {
         if (signal.aborted) throw error
         const current = this.state().threads[threadId] ?? row

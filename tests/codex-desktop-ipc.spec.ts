@@ -302,3 +302,78 @@ it('reports cancellation or closure before a write as definitely not sent', asyn
   }
   expect(test.received.filter(message => message.method === 'thread-follower-start-turn')).toEqual([])
 })
+
+it('interrupts the observed turn with an owner-enforced turn guard and preserves settings', async () => {
+  const threadId = randomUUID(), turnId = randomUUID()
+  let active = true
+  const test = await fixture((message, socket) => {
+    if (initialize(message, socket)) return
+    if (message.method === 'thread-owner-discovery') socket.write(frame({ type: 'response', requestId: message.requestId,
+      method: message.method, resultType: 'success', handledByClientId: ownerId, result: {} }))
+    else if (message.method === 'thread-stream-following-changed' && (message.params as { following: boolean }).following) {
+      socket.write(frame({ type: 'broadcast', method: 'thread-stream-state-changed', sourceClientId: ownerId,
+        targetClientIds: [clientId], version: 11, params: { hostId: 'local', conversationId: threadId,
+          change: { type: 'snapshot', revision: 1, conversationState: { id: threadId, cwd: '/test', workspaceKind: 'project',
+            turns: active ? [{ turnId, status: 'inProgress' }] : [], requests: [],
+            threadRuntimeStatus: { type: active ? 'active' : 'idle' }, currentPermissions: knownPermissions(),
+            latestThreadSettings: { model: 'existing-model' } } } } }))
+    } else if (message.method === 'thread-follower-interrupt-turn') {
+      active = false
+      socket.write(frame({ type: 'response', requestId: message.requestId, method: message.method, resultType: 'success',
+        handledByClientId: ownerId, result: { ok: true, interruptedTurnId: turnId } }))
+    }
+  })
+  const client = await CodexDesktopIpc.connect(test.options)
+  try {
+    const before = (await client.readState(threadId))!
+    expect(await client.interruptTurn(before)).toEqual({ turnId, settingsPreserved: true })
+    const sent = test.received.filter(message => message.method === 'thread-follower-interrupt-turn')
+    expect(sent).toHaveLength(1)
+    expect(sent[0]).toMatchObject({ targetClientId: ownerId, version: 4,
+      params: { conversationId: threadId, mode: 'descendant-cleanup', expectedTurnId: turnId } })
+    expect(Object.keys(sent[0]!.params as object)).toEqual(['conversationId', 'mode', 'expectedTurnId'])
+    await expect(client.interruptTurn(before)).rejects.toThrow('thread-state-changed')
+    expect(test.received.filter(message => message.method === 'thread-follower-interrupt-turn')).toHaveLength(1)
+  } finally { client.close() }
+})
+
+it('refuses interruption when the observed turn changes or an approval appears', async () => {
+  const test = await fixture(initialize)
+  const client = await CodexDesktopIpc.connect(test.options)
+  const expected = { threadId: randomUUID(), clientId: ownerId, supportsUntrustedAppInput: true,
+    revision: 0, status: 'active' as const, activeTurnId: randomUUID(), pendingRequests: 0,
+    workspaceKind: 'project', permissionsKnown: true, permissionsHash: 'permissions', settingsHash: 'settings' }
+  try {
+    const read = vi.spyOn(client, 'readState')
+    for (const changed of [{ activeTurnId: randomUUID() }, { pendingRequests: 1 }, { permissionsHash: 'changed' },
+      { settingsHash: 'changed' }, { status: 'idle' as const }]) {
+      read.mockResolvedValue({ ...expected, ...changed })
+      await expect(client.interruptTurn(expected)).rejects.toThrow('thread-state-changed')
+    }
+    read.mockResolvedValue(expected)
+    await expect(client.interruptTurn(expected, undefined, () => false)).rejects.toThrow('delivery-held')
+    expect(test.received.filter(message => message.method === 'thread-follower-interrupt-turn')).toEqual([])
+  } finally { client.close() }
+})
+
+it('distinguishes a guarded no-op from an acknowledged interrupt whose post-check fails', async () => {
+  const threadId = randomUUID(), turnId = randomUUID()
+  let interruptedTurnId: string | null = null
+  const test = await fixture((message, socket) => {
+    if (initialize(message, socket)) return
+    socket.write(frame({ type: 'response', requestId: message.requestId, method: message.method,
+      resultType: 'success', handledByClientId: ownerId, result: { ok: true, interruptedTurnId } }))
+  })
+  const expected = { threadId, clientId: ownerId, supportsUntrustedAppInput: true,
+    revision: 0, status: 'active' as const, activeTurnId: turnId, pendingRequests: 0,
+    workspaceKind: 'project', permissionsKnown: true, permissionsHash: 'permissions', settingsHash: 'settings' }
+  const client = await CodexDesktopIpc.connect(test.options)
+  try {
+    const read = vi.spyOn(client, 'readState').mockResolvedValue(expected)
+    await expect(client.interruptTurn(expected)).rejects.toThrow('thread-state-changed')
+    interruptedTurnId = turnId
+    read.mockReset().mockResolvedValueOnce(expected).mockRejectedValueOnce(new Error('Post-check unavailable'))
+    expect(await client.interruptTurn(expected)).toEqual({ turnId })
+    expect(test.received.filter(message => message.method === 'thread-follower-interrupt-turn')).toHaveLength(2)
+  } finally { client.close() }
+})

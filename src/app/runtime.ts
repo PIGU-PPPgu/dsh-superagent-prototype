@@ -15,7 +15,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { CodexFileMonitor } from '../codex/file-bridge.ts'
 import { CodexDesktopIpc } from '../codex/desktop-ipc.ts'
-import { CodexMonitor, type CodexFailureCandidate } from './codex-monitor.ts'
+import { CodexMonitor, type CodexAutoHandoffResult, type CodexFailureCandidate } from './codex-monitor.ts'
 import { CodexRouter } from './codex-router.ts'
 import { CodexControl } from './codex-control.ts'
 import { CodexDelivery } from './codex-delivery.ts'
@@ -98,7 +98,6 @@ export class Runtime extends Service implements SourceHost {
   private readonly codexDelivery: CodexDelivery
   /** Non-zero while a main-Session tool is executing an Engine command, suppressing self-triggered domain event notices. */
   private quiet = 0
-  private readonly authorizedCodexHandoffs = new Set<string>()
   constructor(ctx: Context, readonly machine: Machine, restart: () => void) {
     super(ctx, 'orchestrator')
     const runtime = this
@@ -113,7 +112,7 @@ export class Runtime extends Service implements SourceHost {
       const store = opened = this.store = new Store(join(machine.stateDir, 'orchestrator.sqlite'), report)
       this.codexControl = new CodexControl({ store, stateDir: machine.stateDir })
       this.codexMonitor = new CodexMonitor({ store, context: ctx,
-        autoHandoff: (candidate, signal) => this.acceptCodexFailure(candidate, signal),
+        autoHandoff: (candidate, signal) => this.intakeCodexFailure(candidate, signal),
         onScan: () => { try { this.codexControl.sync(); this.codexRouter.refresh(); void this.codexDelivery.request().catch(report) }
           catch (error) { ctx.logger.warn('dsh-superagent Codex Router refresh failed: %s', String(error)) } } })
       this.codexRouter = new CodexRouter({ store, monitor: this.codexMonitor,
@@ -169,8 +168,16 @@ export class Runtime extends Service implements SourceHost {
         deliver: (id, text) => sessions.prompt(masterId, id, text, 'steer'), candidateCard: candidate => candidateCard(links, candidate) })
       const outbox = this.outbox = new Outbox({ store, effects, sources, commands, paused: () => this.paused() })
       const { assessor, executor } = this
-      const policy = () => settingsPolicy(store.settings(), sources,
-        trigger => this.authorizedCodexHandoffs.has(trigger.id))
+      const policy = () => settingsPolicy(store.settings(), sources, trigger => {
+        const grant = store.get(KV.codex.intake(trigger.id))
+        const head = typeof trigger.meta.threadId === 'string' ? this.codexMonitor.routeHead(trigger.meta.threadId) : undefined
+        return trigger.meta.codexAutoIntake === true && !!grant
+          && grant.threadId === trigger.meta.threadId && grant.itemId === trigger.meta.itemId
+          && trigger.id === key('codex-handoff', grant.threadId, grant.itemId)
+          && grant.generation === this.codexMonitor.handoffGeneration()
+          && !!head?.present && !head.archived && head.ready && !head.needsYou
+          && head.assessmentItemId === grant.itemId && (head.stage === 'failed' || head.stage === 'blocked')
+      })
       const engine = this.engine = new Engine({ repo: store, scope: sources, policy, assessor, executor,
         outbox, prepareTicket: (ticket, outcome) => executor.prepare(ticket, outcome), emit: event => {
           // Notify the main Session only about domain events it did not initiate itself.
@@ -211,18 +218,8 @@ export class Runtime extends Service implements SourceHost {
         get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem }, receive: trigger => passes.receive(trigger) }
       this.toolHost = { context: ctx, engine, store, prompts, sessions, settings: this.settings, assessor, resources,
         codexMonitor: this.codexMonitor, codexControl: this.codexControl,
-        codexDesktopStatus: async (threadId, caller) => {
-          const head = this.codexMonitor.routeHead(threadId)
-          if (!this.codexMonitor.view(0, 1).enabled || !head?.present) throw new Error('Codex main conversation is not monitored')
-          const signal = AbortSignal.any([caller, this.lifetime])
-          const client = await CodexDesktopIpc.connect({ signal })
-          try {
-            const state = await client.readState(threadId, signal)
-            return { source: 'Codex Desktop owner', readAt: now(), available: !!state,
-              ...(state ? { status: state.status, pendingRequests: state.pendingRequests,
-                ...(state.activeTurnId ? { activeTurnId: state.activeTurnId } : {}) } : {}) }
-          } finally { client.close() }
-        },
+        codexDesktopStatus: (threadId, caller) => this.codexDesktopStatus(threadId, caller),
+        requestCodexDelivery: () => { void this.codexDelivery.request() },
         ...(codex ? { codex } : {}),
         get github() { return runtime.context({ kind: 'github', health: ['github'] }) },
         requestPass: () => { passes.request() }, sendReplies: () => outbox.sent(),
@@ -262,17 +259,29 @@ export class Runtime extends Service implements SourceHost {
     return ticketEnvironment({ deployment: selected ? { ...deployment, ...selected } : deployment,
       sources, settings: this.store.settings(), ticket, ...trigger ? { trigger } : {} })
   }
-  /** Accept only new, assistant-evidenced failures or technical blockers in a separate DSH ticket. */
-  private async acceptCodexFailure(candidate: CodexFailureCandidate, signal: AbortSignal): Promise<string> {
+  private async codexDesktopStatus(threadId: string, caller: AbortSignal) {
+    const head = this.codexMonitor.routeHead(threadId)
+    if (!this.codexMonitor.view(0, 1).enabled || !head?.present) throw new Error('Codex main conversation is not monitored')
+    const signal = AbortSignal.any([caller, this.lifetime])
+    const client = await CodexDesktopIpc.connect({ signal })
+    try {
+      const state = await client.readState(threadId, signal)
+      const control = this.codexControl.view()
+      return { source: 'Codex Desktop owner', readAt: now(), available: !!state,
+        messaging: { enabled: control.enabled, connected: control.bridgeReady },
+        ...(state ? { status: state.status, pendingRequests: state.pendingRequests,
+          ...(state.activeTurnId ? { activeTurnId: state.activeTurnId } : {}) } : {}) }
+    } finally { client.close() }
+  }
+  /** Persist an authorized candidate; the main Session, not the monitor, decides what happens next. */
+  private async intakeCodexFailure(candidate: CodexFailureCandidate, signal: AbortSignal): Promise<CodexAutoHandoffResult> {
     signal.throwIfAborted()
-    if (this.closing() || this.paused()) throw new Error('Codex handoff is unavailable while DSH is paused')
-    const { store, engine } = this
-    const mapping = KV.codex.handoff(candidate.threadId)
-    const previous = store.get(mapping)
-    if (previous?.itemId === candidate.itemId) {
-      if (store.tickets.get(previous.ticketId)) return previous.ticketId
-      throw new Error('The previous Codex handoff ticket is missing')
-    }
+    if (this.closing() || this.paused()) return { waiting: true }
+    const desktop = await this.codexDesktopStatus(candidate.threadId, signal)
+    if (!desktop.available || desktop.status !== 'idle' || desktop.pendingRequests !== 0) return { waiting: true }
+    const generation = this.codexMonitor.handoffGeneration()
+    if (!generation) return { waiting: true }
+    const { store } = this
     const deployment = this.setup.deployment
     const matchingBinding = Object.entries(deployment.githubBindings ?? {}).find(([, binding]) =>
       candidate.repository && sameName(binding.repository, candidate.repository))
@@ -281,53 +290,25 @@ export class Runtime extends Service implements SourceHost {
     const workspaceMode = githubBinding === 'unavailable' ? 'analysis' : 'execute'
     const trigger: Trigger = {
       id: key('codex-handoff', candidate.threadId, candidate.itemId), source: 'codex',
-      threads: [{ source: 'codex', id: key('codex-item', candidate.threadId, candidate.itemId) }],
-      actor: { source: 'codex', id: 'local-codex-monitor' }, human: true, addressed: 'direct',
+      threads: [{ source: 'codex', id: key('codex-intake', candidate.threadId, candidate.itemId) }],
+      actor: { source: 'codex', id: 'local-codex-monitor' }, human: false, addressed: 'direct',
       at: now(),
       text: JSON.stringify({ kind: candidate.stage === 'blocked' ? 'Codex historical technical blocker' : 'Codex historical failure',
         threadId: candidate.threadId, ...(candidate.turnId ? { turnId: candidate.turnId } : {}),
         title: candidate.title.slice(0, 200), summary: candidate.summary.slice(0, 300),
         evidence: candidate.evidence.slice(0, 200),
         messages: candidate.messages.slice(-6).map(message => ({ role: message.role, text: message.text.slice(0, 1_500) })) }),
-      meta: { threadId: candidate.threadId, itemId: candidate.itemId,
+      meta: { threadId: candidate.threadId, itemId: candidate.itemId, codexAutoIntake: true,
+        ...(candidate.stage ? { stage: candidate.stage } : {}),
         ...(candidate.turnId ? { turnId: candidate.turnId } : {}),
         ...(candidate.repository ? { repository: candidate.repository } : {}), githubBinding, workspaceMode },
     }
-    const condition = candidate.stage === 'blocked' ? 'technical blockage' : 'failure'
-    const scope = workspaceMode === 'execute'
-      ? `Investigate the reported Codex ${condition} in ${candidate.repository} and complete the bounded repair in this ticket's isolated checkout.`
-      : `Investigate the reported Codex ${condition} in this ticket's isolated workspace and report a diagnosis.`
-    this.authorizedCodexHandoffs.add(trigger.id)
-    this.quiet++
-    try {
-      return this.codexControl.forTicket(candidate.threadId, () => {
-        signal.throwIfAborted()
-        const active = store.tickets.open().find(ticket => {
-          const origin = sourceTrigger(this, ticket)
-          return origin?.source === 'codex' && origin.meta.threadId === candidate.threadId
-        })
-        const received = engine.receive(trigger)
-        if (received === 'filtered') throw new Error('Codex handoff was filtered by source scope')
-        let ticketId: string
-        if (active) {
-          if (received !== 'duplicate') engine.attach(active.id, trigger.id, 'New failure evidence from the same Codex conversation')
-          ticketId = active.id
-        } else {
-          const decision = engine.decide(trigger.id, { kind: 'accept', title: `Codex: ${candidate.title.slice(0, 120)}`,
-            scope, reason: `New assistant-evidenced Codex ${condition}`, name: 'codex-recovery',
-            note: workspaceMode === 'execute'
-              ? 'This is a historical Codex snapshot. Work only in this ticket workspace. Do not send messages to, resume, or interrupt the original Codex conversation.'
-              : 'This is a historical Codex snapshot. Diagnose in this empty ticket workspace. Do not use a GitHub account, clone an unrelated repository, or write to the original Codex conversation.' })
-          if (decision.kind !== 'accept' || !decision.ticketId) throw new Error('Codex handoff was not accepted')
-          ticketId = decision.ticketId
-        }
-        store.set(mapping, { itemId: candidate.itemId, ticketId, at: now() })
-        return ticketId
-      })
-    } finally {
-      this.quiet--
-      this.authorizedCodexHandoffs.delete(trigger.id)
-    }
+    this.store.atomic(() => {
+      store.set(KV.codex.intake(trigger.id), { threadId: candidate.threadId, itemId: candidate.itemId, generation })
+      const received = this.passes.receive(trigger)
+      if (received === 'filtered') throw new Error('Codex handoff was filtered by source scope')
+    })
+    return { triggerId: trigger.id }
   }
   checkSetup(): void { this.setup.check() }
   receive(trigger: Trigger): ReceiveResult { return this.passes.receive(trigger) }

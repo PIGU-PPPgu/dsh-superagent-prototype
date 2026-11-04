@@ -113,3 +113,53 @@ it('relays a new technical failure even when DSH accepts it in the same scan', (
     expect(relay).toHaveBeenCalledTimes(3)
   } finally { store.close() }
 })
+
+it('relays ticket results and completed conversations once, not every phase or summary rewrite', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'codex-router-'))
+  directories.push(directory)
+  const store = new Store(join(directory, 'orchestrator.sqlite'))
+  try {
+    const thread = { id: 'thread-a', title: 'Build', sourceKind: 'vscode', archived: false, present: true,
+      latestTurnId: 'turn-a', stage: 'progress' as const, summary: 'Building' }
+    const ticket = { ...thread, title: 'Codex: Build', handoffTicketId: 'ticket-a', handoffStage: { stage: 'working' as const } }
+    let current: CodexMonitorView = { enabled: true, total: 1, attentionTotal: 0, attention: [],
+      managedTotal: 1, managed: [ticket], threads: [thread] }
+    const relay = vi.fn()
+    const router = new CodexRouter({ store, monitor: { view: () => current }, relay })
+    router.refresh()
+    expect(relay).toHaveBeenCalledTimes(1)
+
+    // Becoming working, or changing only its summary, is not a new report.
+    current = { ...current, managed: [{ ...ticket, summary: 'Still building' }] }
+    router.refresh()
+    expect(relay).toHaveBeenCalledTimes(1)
+
+    const waiting = { ...ticket, summary: 'Waiting for the test result', handoffReportId: 'report-a',
+      handoffStage: { stage: 'idle' as const } }
+    current = { ...current, managed: [waiting] }
+    expect(router.refresh().priorities).toContainEqual(expect.objectContaining({ kind: 'ticketResult', ticketId: 'ticket-a',
+      summary: 'Waiting for the test result' }))
+    expect(relay).toHaveBeenCalledTimes(2)
+    current = { ...current, managed: [{ ...waiting, summary: 'Reworded: still waiting for the test result' }] }
+    router.refresh()
+    expect(relay).toHaveBeenCalledTimes(2)
+
+    const ended = { ...waiting, summary: 'All checks passed', handoffReportId: 'report-b',
+      handoffStage: { stage: 'ended' as const } }
+    current = { ...current, managed: [ended] }
+    expect(router.refresh().priorities).toContainEqual(expect.objectContaining({ kind: 'ticketEnded', source: 'DSH ticket state', ticketId: 'ticket-a',
+      summary: 'All checks passed' }))
+    expect(relay).toHaveBeenCalledTimes(3)
+    current = { ...current, managed: [{ ...ended, summary: 'Rephrased successful completion' }] }
+    router.refresh()
+    expect(relay).toHaveBeenCalledTimes(3)
+
+    // An original Codex conversation can complete without creating a Ticket.
+    current = { ...current, managedTotal: 0, managed: [], threads: [{ ...thread, stage: 'reportedComplete', summary: 'Implemented' }] }
+    expect(router.refresh().priorities).toContainEqual(expect.objectContaining({ kind: 'reportedComplete', source: 'persisted Codex history', threadId: 'thread-a',
+      summary: 'Implemented' }))
+    expect(relay).toHaveBeenCalledTimes(4)
+    router.refresh()
+    expect(relay).toHaveBeenCalledTimes(4)
+  } finally { store.close() }
+})

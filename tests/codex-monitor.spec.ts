@@ -5,6 +5,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { afterEach, expect, it, vi } from 'vitest'
 import { CodexMonitor, type CodexFailureCandidate, type CodexMonitorDeps } from '../src/app/codex-monitor.ts'
 import { Store } from '../src/app/store.ts'
+import { CodexRouter } from '../src/app/codex-router.ts'
 import type { Ticket } from '../src/core/index.ts'
 import type { MonitoredCodexThread } from '../src/codex/monitor-read.ts'
 import { listLocalCodexInventory } from '../src/codex/local-inventory.ts'
@@ -104,7 +105,8 @@ function fixture() {
     ({ default: { provider: 'magpie', model: 'test-model' } }) } } as unknown as CodexMonitorDeps['context']
   const connect = vi.fn(async () => rpc as unknown as Awaited<ReturnType<NonNullable<CodexMonitorDeps['connect']>>>)
   const inventory = vi.fn(async () => localRows)
-  const autoHandoff = vi.fn(async (_candidate: CodexFailureCandidate) => 'ticket-codex')
+  const autoHandoff = vi.fn(async (candidate: CodexFailureCandidate): Promise<{ triggerId: string } | { waiting: true }> =>
+    ({ triggerId: `trigger-${candidate.itemId}` }))
   const monitor = new CodexMonitor({ store, context, connect, inventory, now: () => now, autoHandoff })
   return { store, monitor, rpc, stream, connect, inventory, autoHandoff, requests, setPhase: (value: number) => { phase = value },
     setFailRead: (value: boolean) => { failRead = value },
@@ -150,6 +152,9 @@ it('automatically hands off only a new assistant-evidenced failure, once per ite
   expect(autoHandoff).toHaveBeenCalledTimes(1)
   expect(autoHandoff.mock.calls[0]?.[0]).toMatchObject({ threadId: 'thread-a', itemId: 'answer-new-1',
     summary: '发布任务失败' })
+  expect(monitor.view().threads[0]).toMatchObject({ handoffTriggerId: 'trigger-answer-new-1' })
+  expect(monitor.view().threads[0]?.handoffTicketId).toBeUndefined()
+  monitor.handoffDecision('trigger-answer-new-1', { kind: 'accept', ticketId: 'ticket-codex' })
   expect(monitor.view().threads[0]?.handoffTicketId).toBe('ticket-codex')
   await monitor.scanOnce()
   expect(autoHandoff).toHaveBeenCalledTimes(1)
@@ -170,6 +175,105 @@ it('keeps the assistant item as the handoff evidence when a tool item follows it
   expect(autoHandoff.mock.calls[0]?.[0]).toMatchObject({ itemId: 'answer-new-1' })
 })
 
+it('waits for a safe Desktop state before intake and retries on a later scan', async () => {
+  const { monitor, autoHandoff, setDecision, setPhase, advanceMinutes } = fixture()
+  autoHandoff.mockResolvedValueOnce({ waiting: true })
+  monitor.setEnabled(true)
+  await monitor.scanOnce()
+  monitor.setAutoHandoff(true)
+  advanceMinutes(1)
+  setDecision(JSON.stringify({ needsAttention: true, stage: 'failed', kind: 'failure',
+    reason: '构建失败', action: '检查构建', summary: '构建失败', evidence: '请检查发布结果' }))
+  setPhase(1)
+  await monitor.scanOnce()
+  expect(monitor.view().threads[0]?.handoffTriggerId).toBeUndefined()
+  await monitor.scanOnce()
+  expect(autoHandoff).toHaveBeenCalledTimes(2)
+  expect(monitor.view().threads[0]?.handoffTriggerId).toBe('trigger-answer-new-1')
+})
+
+it('does not repeat an ignored candidate or accept one after auto intake is disabled', async () => {
+  const { monitor, autoHandoff, setDecision, setPhase, advanceMinutes } = fixture()
+  monitor.setEnabled(true)
+  await monitor.scanOnce()
+  monitor.setAutoHandoff(true)
+  advanceMinutes(1)
+  setDecision(JSON.stringify({ needsAttention: true, stage: 'failed', kind: 'failure',
+    reason: '构建失败', action: '检查构建', summary: '构建失败', evidence: '请检查发布结果' }))
+  setPhase(1)
+  await monitor.scanOnce()
+  const triggerId = monitor.view().threads[0]!.handoffTriggerId!
+  monitor.handoffDecision(triggerId, { kind: 'ignore' })
+  await monitor.scanOnce()
+  expect(autoHandoff).toHaveBeenCalledTimes(1)
+  monitor.setAutoHandoff(false)
+  expect(() => monitor.handoffDecision(triggerId, { kind: 'accept', ticketId: 'late-ticket' })).toThrow('disabled')
+})
+
+it('records ignore durably and preserves a newer pending candidate when an older one is ignored again', async () => {
+  const { monitor, setDecision, setPhase, advanceMinutes } = fixture()
+  monitor.setEnabled(true); await monitor.scanOnce(); monitor.setAutoHandoff(true)
+  setDecision(JSON.stringify({ needsAttention: true, stage: 'failed', kind: 'failure',
+    reason: '构建失败', action: '检查构建', summary: '构建失败', evidence: '请检查发布结果' }))
+  advanceMinutes(1); setPhase(1); await monitor.scanOnce()
+  const first = monitor.view().threads[0]!.handoffTriggerId!
+  advanceMinutes(6); await monitor.scanOnce()
+  monitor.handoffDecision(first, { kind: 'ignore' })
+  expect(() => monitor.handoffDecision(first, { kind: 'accept', ticketId: 'late-ticket' })).toThrow('stale')
+  advanceMinutes(1); setPhase(2); await monitor.scanOnce()
+  const second = monitor.view().threads[0]!.handoffTriggerId!
+  expect(second).not.toBe(first)
+  monitor.handoffDecision(first, { kind: 'ignore' })
+  expect(monitor.view().threads[0]!.handoffTriggerId).toBe(second)
+})
+
+it('relays a new DSH Ticket result even while the original Codex item stays unchanged', async () => {
+  const { store, monitor, setDecision, setPhase, advanceMinutes } = fixture()
+  monitor.setEnabled(true); await monitor.scanOnce(); monitor.setAutoHandoff(true)
+  setDecision(JSON.stringify({ needsAttention: true, stage: 'failed', kind: 'failure',
+    reason: '构建失败', action: '检查构建', summary: '构建失败', evidence: '请检查发布结果' }))
+  advanceMinutes(1); setPhase(1); await monitor.scanOnce()
+  const triggerId = monitor.view().threads[0]!.handoffTriggerId!
+  monitor.handoffDecision(triggerId, { kind: 'accept', ticketId: 'ticket-result' })
+  const ticket = { id: 'ticket-result', title: 'Diagnosis', updatedAt: '2026-11-01T12:31:00Z',
+    assignments: [{ id: 'assignment-result', state: 'running', createdAt: '2026-11-01T12:31:00Z',
+      report: { state: 'waiting', summary: 'First result', at: '2026-11-01T12:31:00Z' } }] } as Ticket
+  store.tickets.save(ticket)
+  const relay = vi.fn(), router = new CodexRouter({ store, monitor, relay })
+  router.refresh()
+  const before = monitor.view().managed[0]!
+  store.tickets.save({ ...ticket, assignments: [{ ...ticket.assignments[0]!, report: {
+    state: 'waiting', summary: 'New result', at: '2026-11-01T12:32:00Z' } }] })
+  const after = monitor.view().managed[0]!
+  expect(after.assessmentItemId).toBe(before.assessmentItemId)
+  expect(after.handoffReportId).not.toBe(before.handoffReportId)
+  router.refresh()
+  expect(relay).toHaveBeenCalledTimes(2)
+  expect(router.view().priorities).toContainEqual(expect.objectContaining({ kind: 'ticketResult', summary: 'New result' }))
+  router.refresh()
+  expect(relay).toHaveBeenCalledTimes(2)
+})
+
+it('refuses a late accept after a newer user message but preserves the candidate for idempotent lookup', async () => {
+  const { monitor, autoHandoff, setDecision, setPhase, setUserReply, advanceMinutes } = fixture()
+  monitor.setEnabled(true)
+  await monitor.scanOnce()
+  monitor.setAutoHandoff(true)
+  advanceMinutes(1)
+  setDecision(JSON.stringify({ needsAttention: true, stage: 'failed', kind: 'failure',
+    reason: '构建失败', action: '检查构建', summary: '构建失败', evidence: '请检查发布结果' }))
+  setPhase(1)
+  await monitor.scanOnce()
+  const triggerId = monitor.view().threads[0]!.handoffTriggerId!
+  setPhase(2)
+  setUserReply(true)
+  await monitor.scanOnce()
+  expect(() => monitor.handoffDecision(triggerId, { kind: 'accept', ticketId: 'late-ticket' })).toThrow('stale')
+  expect(autoHandoff).toHaveBeenCalledTimes(2)
+  expect(monitor.view().threads[0]?.handoffTriggerId).toBe('trigger-answer-new-2')
+  expect(monitor.view().threads[0]?.handoffTicketId).toBeUndefined()
+})
+
 it('hands an assistant-evidenced technical blocker to DSH without treating approval as a blocker', async () => {
   const { monitor, autoHandoff, setDecision, setPhase, advanceMinutes } = fixture()
   monitor.setEnabled(true)
@@ -181,8 +285,9 @@ it('hands an assistant-evidenced technical blocker to DSH without treating appro
   setPhase(1)
   await monitor.scanOnce()
   expect(autoHandoff.mock.calls[0]?.[0]).toMatchObject({ stage: 'blocked', itemId: 'answer-new-1' })
-  expect(monitor.view().attentionTotal).toBe(0)
-  expect(monitor.view().managedTotal).toBe(1)
+  expect(monitor.view().attentionTotal).toBe(1)
+  expect(monitor.view().managedTotal).toBe(0)
+  expect(monitor.view().threads[0]?.handoffTriggerId).toBe('trigger-answer-new-1')
 })
 
 it('never dispatches a mixed failure or blocker that asks for human approval', async () => {
@@ -240,6 +345,7 @@ it('shows a newer user decision after an earlier Codex item was handed to DSH', 
     reason: '构建失败', action: '检查构建', summary: '构建失败', evidence: '请检查发布结果' }))
   setPhase(1)
   await monitor.scanOnce()
+  monitor.handoffDecision('trigger-answer-new-1', { kind: 'accept', ticketId: 'ticket-first' })
   setDecision(reviewDecision)
   setPhase(2)
   await monitor.scanOnce()
@@ -250,7 +356,7 @@ it('shows a newer user decision after an earlier Codex item was handed to DSH', 
 
 it('keeps separate DSH tickets from two failed items in the same Codex conversation', async () => {
   const { store, monitor, autoHandoff, setDecision, setPhase, advanceMinutes } = fixture()
-  autoHandoff.mockResolvedValueOnce('ticket-one').mockResolvedValueOnce('ticket-two')
+  autoHandoff.mockResolvedValueOnce({ triggerId: 'trigger-one' }).mockResolvedValueOnce({ triggerId: 'trigger-two' })
   monitor.setEnabled(true)
   await monitor.scanOnce()
   monitor.setAutoHandoff(true)
@@ -259,9 +365,11 @@ it('keeps separate DSH tickets from two failed items in the same Codex conversat
   advanceMinutes(1)
   setPhase(1)
   await monitor.scanOnce()
+  monitor.handoffDecision('trigger-one', { kind: 'accept', ticketId: 'ticket-one' })
   advanceMinutes(1)
   setPhase(2)
   await monitor.scanOnce()
+  monitor.handoffDecision('trigger-two', { kind: 'accept', ticketId: 'ticket-two' })
   store.tickets.save({ id: 'ticket-one', title: '第一次修复', updatedAt: '2026-11-01T12:31:00Z',
     ended: { at: '2026-11-01T12:31:00Z', by: 'executor', outcome: 'completed' },
     assignments: [{ report: { state: 'ready', summary: '第一次修复已完成', at: '2026-11-01T12:31:00Z' } }] } as Ticket)

@@ -201,7 +201,7 @@ export function settingsPolicy(settings: Settings, sources: SourceScope,
   return {
     version, paused: settings.paused, evalTimeoutMs: settings.eval.timeoutSeconds * 1000,
     gate(trigger: Trigger, thread, tickets) {
-      if (trigger.source === 'codex' && trigger.actor.source === 'codex'
+      if (trigger.source === 'codex' && !trigger.human && trigger.actor.source === 'codex'
         && trigger.actor.id === 'local-codex-monitor' && trigger.addressed === 'direct'
         && !trigger.channel && codexAutoAuthorized?.(trigger)) {
         return { admissible: true, strength: 'explicit', basis: { source: 'codex', scope: trigger.meta,

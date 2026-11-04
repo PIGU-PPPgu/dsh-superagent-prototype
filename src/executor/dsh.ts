@@ -449,13 +449,16 @@ export class DshExecutor implements Executor {
   private failed(ticketId: string, summary: string): void {
     this.host.store.atomic(() => {
       const updated = this.host.engine.report(ticketId, { state: 'failed', summary })
-      if (!this.panelOnly(updated)) this.relay(resultRelay(updated, 'failed', summary))
+      this.reportResult(updated, 'failed', summary)
     })
   }
   private relay({ id, text }: { id: string; text: string }): void { this.host.sessions.relay(id, text) }
-  private panelOnly(ticket: Ticket): boolean {
-    const origin = sourceTrigger(this.host, ticket)
-    return origin?.source === 'codex' && !origin.channel
+  private reportResult(ticket: Ticket, state: string, summary: string): void {
+    const relay = resultRelay(ticket, state, summary)
+    if (sourceTrigger(this.host, ticket)?.source === 'codex') {
+      relay.id = `codex-result:${key(ticket.id, latestAssignment(ticket)?.id ?? '', state, summary)}`
+    }
+    this.relay(relay)
   }
   private async launch(ticket: Ticket, assignment: Assignment): Promise<void> {
     const current = () => {
@@ -700,10 +703,9 @@ export class DshExecutor implements Executor {
       const before = latestReport(current)?.summary ?? ''
       const updated = this.host.engine.report(ticket.id, { state: 'waiting', summary: said || before })
       // A quiet final after orchestrator_report is not a new status or an empty handoff.
-      if (this.panelOnly(ticket)) return
-      if (said) this.relay(resultRelay(updated, 'waiting', said))
+      if (said) this.reportResult(updated, 'waiting', said)
       else if (!before.trim()) {
-        this.relay(resultRelay(updated, 'waiting', 'Worker ended without a status report. Use orchestrator_ticket_request_status to request one.'))
+        this.reportResult(updated, 'waiting', 'Worker ended without a status report. Use orchestrator_ticket_request_status to request one.')
       }
     })
   }

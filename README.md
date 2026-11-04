@@ -8,7 +8,7 @@ dsh-superagent is a proactive coding agent for configured GitHub repositories, p
 
 It is also a way of working with an agent: **take as little human attention as possible, and give as much value as possible.** An agent that can act for a whole team can also waste a whole team's attention, so it acts only when asked or when a rule the team wrote allows it, and speaks only when someone must act or can use a result. [docs/000-philosophy.md](docs/000-philosophy.md) explains the principle and what it asks of the operator.
 
-On a Mac, an optional Codex monitor finds conversations with local rollout files, groups child threads under each main conversation, checks recent child turn outcomes and shows attention and DSH Tickets in the Superagent panel. Separately enabled automatic handoff accepts new assistant-evidenced failures and technical blockers into isolated DSH Tickets. Codex observations come from stored history; the monitor never controls an existing Codex thread. See [the Codex monitor guide](docs/011-codex-monitor.md).
+On a Mac, the optional Codex monitor discovers stored conversations, groups child threads and sends meaningful changes and results to the DSH main Session. Automatic handoff routes new evidenced failures through the main Session's decisions. Separately enabled session communication lets DSH coordinate existing Desktop conversations through a version-pinned local adapter; approvals stay with the user. Stored history and live Desktop state are reported separately. See [the monitor guide](docs/011-codex-monitor.md) and [the router guide](docs/012-codex-router.md) for verified capabilities and limits.
 
 ## Setup
 
