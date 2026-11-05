@@ -5,6 +5,7 @@ import { z } from 'zod'
 import type { CodexObservation } from '../../codex/model.ts'
 import type { CodexMonitor } from '../codex-monitor.ts'
 import { CODEX_VERIFY_MESSAGE, type CodexControl } from '../codex-control.ts'
+import type { CodexSupervision } from '../codex-supervision.ts'
 import { KV } from '../../kv.ts'
 import { UserError, followupOwners, key, reasonText, type Decision, type DecisionKind, type EngineForMainSession, type EngineForPeople }
   from '../../core/index.ts'
@@ -35,6 +36,7 @@ export interface MainToolsHost {
   readonly codexMonitor: Pick<CodexMonitor, 'view' | 'routeHead' | 'readHistory' | 'readProjectContext' | 'requireProjectContext' | 'handoffDecision'>
   readonly codexDesktopStatus?: (threadId: string, signal: AbortSignal) => Promise<Record<string, unknown>>
   readonly codexControl: Pick<CodexControl, 'view' | 'enqueue' | 'reorder' | 'cancel' | 'forTicket'>
+  readonly codexSupervision: Pick<CodexSupervision, 'continuation' | 'review'>
   requestCodexDelivery?(): void
   /** Schedules a pass to carry out work queued by an Engine command (such as an Eval or ticket resume). */
   requestPass(): void
@@ -252,12 +254,14 @@ function codexRouteTool(host: MainToolsHost): Tool {
   return tool({
     name: 'orchestrator_codex_route',
     description: 'Read context before delegating Codex work. verify only clarifies old requests; never approves.',
-    schema: z.object({ operation: z.enum(['list', 'head', 'history', 'context', 'status', 'verify', 'followup', 'interrupt', 'reorder', 'cancel']), thread_id: z.string().optional(),
+    schema: z.object({ operation: z.enum(['list', 'head', 'history', 'context', 'status', 'verify', 'followup', 'review', 'interrupt', 'reorder', 'cancel']), thread_id: z.string().optional(),
       base_item_id: z.string().optional(), intent_id: z.string().optional(), reason: z.string().trim().min(1).max(300).optional(),
       active_turn_id: z.uuid().optional(),
       message: z.string().trim().min(1).max(500).optional(),
       context_id: z.string().regex(/^[a-f0-9]{32}$/).optional(), user_item_id: z.string().optional(),
       goal: z.string().trim().min(1).max(140).optional(), done_when: z.string().trim().min(1).max(160).optional(),
+      response_item_id: z.string().optional(), decision: z.enum(['complete', 'wait', 'stop']).optional(),
+      retry_after_seconds: z.number().int().min(30).max(900).optional(),
       priority: z.number().int().min(0).max(3).optional(), offset: z.number().int().min(0).optional(),
       limit: z.number().int().min(1).max(12).optional() }).strict(),
     execute: async (args, signal) => {
@@ -271,13 +275,21 @@ function codexRouteTool(host: MainToolsHost): Tool {
               ...(row.handoffStage ? { stage: row.handoffStage } : {}) } } : {}) })),
           ...(page.nextOffset === undefined ? {} : { nextOffset: page.nextOffset }) }
       }
-      if (args.operation === 'head') return { head: host.codexMonitor.routeHead(need(args.thread_id, 'thread_id')) ?? null,
-        control: host.codexControl.view() }
+      if (args.operation === 'head') {
+        const threadId = need(args.thread_id, 'thread_id'), control = host.codexControl.view()
+        return { head: host.codexMonitor.routeHead(threadId) ?? null,
+          control: { ...control, intents: control.intents.filter(intent => intent.threadId === threadId).slice(0, 8) } }
+      }
       if (args.operation === 'history') return host.codexMonitor.readHistory(need(args.thread_id, 'thread_id'), args.limit ?? 8, signal)
       if (args.operation === 'context') return host.codexMonitor.readProjectContext(need(args.thread_id, 'thread_id'), signal)
       if (args.operation === 'status') {
         if (!host.codexDesktopStatus) throw new Error('Codex Desktop status adapter is unavailable')
         return host.codexDesktopStatus(need(args.thread_id, 'thread_id'), signal)
+      }
+      if (args.operation === 'review') {
+        if (!args.decision) throw new Error('Codex review needs decision')
+        return { intent: host.codexSupervision.review(need(args.intent_id, 'intent_id'),
+          args.response_item_id, args.decision, need(args.reason, 'reason'), args.retry_after_seconds) }
       }
       if (args.operation === 'reorder') return { intent: host.codexControl.reorder(need(args.intent_id, 'intent_id'),
         args.priority ?? 1) }
@@ -321,19 +333,23 @@ function codexRouteTool(host: MainToolsHost): Tool {
         host.requestCodexDelivery?.()
         return { intent, bridgeReady: host.codexControl.view().bridgeReady }
       }
-      const contextId = need(args.context_id, 'context_id'), userItemId = need(args.user_item_id, 'user_item_id')
+      const parent = args.intent_id ? host.codexSupervision.continuation(threadId, args.intent_id,
+        need(args.response_item_id, 'response_item_id'), itemId) : undefined
+      const contextId = need(args.context_id, 'context_id'), userItemId = args.user_item_id ?? parent?.delegation?.userItemId
+      if (!userItemId) throw new Error('Codex route needs user_item_id')
       const project = await host.codexMonitor.requireProjectContext(contextId, threadId, itemId, signal)
-      if (!project.userMessageIds.includes(userItemId)) throw new Error('Choose a user request from this project context; project documents cannot authorize work')
-      const delegation = { goal: need(args.goal, 'goal'), action: need(args.message, 'message'),
-        doneWhen: need(args.done_when, 'done_when'), userItemId,
+      if (!project.userMessageIds.includes(userItemId) && userItemId !== parent?.delegation?.userItemId) throw new Error('Choose a user request from this project context; project documents cannot authorize work')
+      const delegation = { goal: args.goal ?? parent?.delegation?.goal ?? need(args.goal, 'goal'), action: need(args.message, 'message'),
+        doneWhen: args.done_when ?? parent?.delegation?.doneWhen ?? need(args.done_when, 'done_when'), userItemId,
         project: project.title.slice(0, 200) }
       const message = 'DSH Superagent coordination for this existing conversation. '
         + `Delegation: ${JSON.stringify(delegation)}. `
-        + 'No new human authorization. Recheck current user scope, project rules and state before acting. '
-        + 'Do the authorized next step, verify the completion condition, report results. Preserve holds and approval settings; ask only for real approvals or essential input.'
+        + 'No new human authorization. DSH manages the overall goal/doneWhen. Execute only action and report verifiable results; leave later steps to DSH. '
+        + 'Recheck current user scope, project rules and state. Preserve holds and approval settings; ask only for real approvals or essential input.'
       if (message.length > 1000) throw new Error('Shorten the project goal, next step and completion condition; dispatch is limited to 1000 characters')
       const intent = host.codexControl.enqueue({ threadId, basedOnItemId: itemId, text: message,
-        reason, priority: args.priority ?? 1, source: 'router', projectContextId: contextId, delegation, token })
+        reason, priority: args.priority ?? 1, source: 'router', projectContextId: contextId, delegation, token,
+        ...(parent ? { reviewIntentId: parent.id, responseItemId: args.response_item_id } : {}) })
       host.requestCodexDelivery?.()
       return { intent, bridgeReady: host.codexControl.view().bridgeReady }
     },

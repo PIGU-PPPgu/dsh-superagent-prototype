@@ -10,11 +10,13 @@ it('shows the project goal and delegation details instead of an opaque conversat
     id: 'intent-a', threadId: 'thread-a', basedOnItemId: 'head-a', text: 'Host coordination message', reason: 'Technical routing reason',
     priority: 1, status: 'sent', source: 'router', createdAt: '', updatedAt: '',
     delegation: { project: '知识库重构', goal: '保留已发布内容并核实入口', action: '只读核查当前入口', doneWhen: '返回可用性与证据', userItemId: 'user-goal' },
+    supervision: { phase: 'needsReview', reason: '本轮已回复，需按整体目标判断后续' },
   }] }
   await mount(); await click(tab(zh['tab.codex']))
   expect(text()).toContain('知识库重构')
   expect(text()).toContain('保留已发布内容并核实入口')
   expect(text()).toContain('派发详情')
+  expect(text()).toContain('待 DSH 判断')
   expect(text()).not.toContain('Host coordination message')
 })
 it('enables automatic observation from the Codex panel', async () => {

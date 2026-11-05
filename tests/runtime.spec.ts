@@ -450,6 +450,46 @@ it('lets the DSH main Session inspect bounded Codex history through its read-onl
   expect(read).toHaveBeenCalledWith('thread-a', 3, expect.any(AbortSignal))
 })
 
+it('continues a managed goal through the tool protocol, then waits or completes explicitly', async () => {
+  const threadId = 'thread-managed', turnId = randomUUID(), context = testCodexRoutingContext(threadId, 'reply-one')
+  runtime.codexControl.setEnabled(true)
+  runtime.codexControl.setBridgeAvailable(true)
+  const first = runtime.codexControl.enqueue({ threadId, basedOnItemId: 'before', text: 'First step', reason: 'Overall goal', source: 'router',
+    projectContextId: context.contextId, delegation: { goal: 'Verify both steps', action: 'First step', doneWhen: 'Both replies verified', userItemId: 'user-goal' } })
+  runtime.codexControl.claim(first.id); runtime.codexControl.finish(first.id, 'sent', { turnId })
+  const setReply = (sentTurn: string, itemId: string, text: string) => runtime.store.set('codex-monitor-v1', {
+    version: 1, enabled: true, initialized: true, threads: { [threadId]: { id: threadId, sourceKind: 'vscode', archived: false,
+      present: true, baselined: true, seenAt: '', lastItemId: itemId, latestTurnId: sentTurn, latestTurnStatus: 'completed',
+      context: [{ id: itemId, turnId: sentTurn, role: 'assistant', text }] } },
+  })
+  setReply(turnId, 'reply-one', 'First step complete; second remains')
+  const internal = runtime as unknown as { codexMonitor: CodexMonitor; codexSupervision: { refresh(): void } }
+  internal.codexSupervision.refresh()
+  const current = { ...context, contextId: 'b'.repeat(32), userMessageIds: [] }
+  vi.spyOn(internal.codexMonitor, 'requireProjectContext').mockResolvedValue(current)
+  vi.spyOn(CodexDesktopIpc, 'connect').mockRejectedValue(new Error('offline fixture'))
+  const result = await runTool(runtime.masterId, 'orchestrator_codex_route', { operation: 'followup', thread_id: threadId,
+    base_item_id: 'reply-one', context_id: current.contextId, intent_id: first.id, response_item_id: 'reply-one',
+    reason: 'Overall criterion is not met yet', message: 'Second step' })
+  const child = result.intent as { id: string; delegation: { goal: string; doneWhen: string; userItemId: string } }
+  expect(child.delegation).toMatchObject({ goal: 'Verify both steps', doneWhen: 'Both replies verified', userItemId: 'user-goal' })
+  expect(runtime.codexControl.view().intents.find(i => i.id === first.id)?.supervision).toMatchObject({ phase: 'continued', nextIntentId: child.id })
+  const secondTurn = randomUUID()
+  runtime.codexControl.claim(child.id); runtime.codexControl.finish(child.id, 'sent', { turnId: secondTurn })
+  setReply(secondTurn, 'reply-two', 'Both steps verified')
+  internal.codexSupervision.refresh()
+  await expect(runTool(runtime.masterId, 'orchestrator_codex_route', { operation: 'review', intent_id: child.id,
+    response_item_id: 'reply-two', reason: 'Decision required' })).rejects.toThrow('decision')
+  await runTool(runtime.masterId, 'orchestrator_codex_route', { operation: 'review', intent_id: child.id,
+    response_item_id: 'reply-two', decision: 'wait', retry_after_seconds: 60, reason: 'Wait for final independent evidence' })
+  expect(runtime.codexControl.view().intents.find(i => i.id === child.id)?.supervision?.phase).toBe('waiting')
+  await expect(runTool(runtime.masterId, 'orchestrator_codex_route', { operation: 'review', intent_id: child.id,
+    response_item_id: 'old-reply', decision: 'complete', reason: 'Wrong reply' })).rejects.toThrow('stale')
+  await runTool(runtime.masterId, 'orchestrator_codex_route', { operation: 'review', intent_id: child.id,
+    response_item_id: 'reply-two', decision: 'complete', reason: 'Both required step outputs verified' })
+  expect(runtime.codexControl.view().intents.find(i => i.id === child.id)?.supervision?.phase).toBe('completed')
+})
+
 it('requires project understanding before interrupting a verified active turn', async () => {
   runtime.store.set('codex-monitor-v1', { version: 1, enabled: true, initialized: true, threads: {
     'thread-active': { id: 'thread-active', name: 'Build task', sourceKind: 'vscode', archived: false, present: true,

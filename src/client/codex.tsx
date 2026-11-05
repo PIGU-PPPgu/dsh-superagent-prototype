@@ -14,6 +14,11 @@ const stages: Record<string, { zh: string; en: string }> = {
   failed: { zh: '报告失败', en: 'Reported failed' },
   unknown: { zh: '待核对', en: 'Uncertain' },
 }
+const supervisionPhases = {
+  awaitingReply: ['等待 Codex 回复', 'Awaiting Codex'], needsReview: ['待 DSH 判断', 'For DSH review'],
+  waiting: ['暂缓跟进', 'Waiting'], continued: ['已排下一步', 'Next step queued'],
+  completed: ['已完成', 'Completed'], stopped: ['已停止跟进', 'Supervision stopped'],
+} as const
 const workState = (stage: { stage: string; action?: string } | undefined, chinese: boolean): string => {
   if (!stage) return chinese ? '已接单' : 'Accepted'
   if (stage.stage === 'person') {
@@ -134,10 +139,13 @@ export function CodexPage() {
           <strong>{intent.delegation?.project ?? intent.threadId}</strong>
           <p className="dt-row-quote dt-clamp">{intent.delegation?.goal ?? intent.reason}</p>
           {intent.delegation && <details><summary>{chinese ? '派发详情' : 'Delegation'}</summary>
-            <p>{intent.delegation.action}</p><p>{intent.delegation.doneWhen}</p></details>}
+            <p>{intent.delegation.action}</p><p>{intent.delegation.doneWhen}</p>
+            {intent.supervision?.reason && <p>{intent.supervision.reason}</p>}</details>}
           <div className="dt-row-meta"><span>{intent.operation === 'verify' ? (chinese ? '核实请求' : 'Verify request') : intent.operation === 'interrupt'
             ? (chinese ? '中断' : 'Interrupt') : (chinese ? '后续消息' : 'Follow-up')}</span>
-            <span>{intent.status}</span><span>{timeText(intent.updatedAt, chinese)}</span></div>
+            <span>{intent.status === 'sent' && intent.supervision
+              ? supervisionPhases[intent.supervision.phase][chinese ? 0 : 1] : intent.status}</span>
+            <span>{timeText(intent.supervision?.decidedAt ?? intent.supervision?.response?.observedAt ?? intent.updatedAt, chinese)}</span></div>
         </div></li>)}</ul>}
     </section>}
 

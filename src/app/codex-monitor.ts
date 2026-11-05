@@ -168,6 +168,12 @@ export interface CodexRoutingContext extends CodexProjectContext {
   contextId: string
   userMessageIds: string[]
 }
+export interface CodexSupervisionSnapshot {
+  head: CodexRouteHead
+  latestTurnId?: string
+  latestTurnStatus?: string
+  messages: { id: string; turnId?: string; role: 'user' | 'assistant'; text: string }[]
+}
 interface ContextReceipt { data: CodexRoutingContext; fingerprint: string; expiresAt: number; generation: number;
   sourceCwd?: string; sourceRepository?: string }
 const contextFingerprint = ({ readAt: _readAt, ...data }: CodexProjectContext) => key('codex-context', JSON.stringify(data))
@@ -348,6 +354,13 @@ export class CodexMonitor {
           && !row.context.some(message => message.role === 'assistant' && message.id === row.attention?.itemId))
         ? { verificationRequestId: humanRequestId(row) } : {}),
       ...(row.userHold ? { pausedByUser: true } : {}) }
+  }
+
+  supervisionSnapshot(threadId: string): CodexSupervisionSnapshot | undefined {
+    const row = this.state().threads[threadId], head = this.routeHead(threadId)
+    if (!row || !head) return undefined
+    return { head, latestTurnId: row.latestTurnId, latestTurnStatus: row.latestTurnStatus,
+      messages: row.context.map(message => ({ id: message.id, turnId: message.turnId, role: message.role, text: message.text })) }
   }
 
   /** Give the DSH main Session bounded stored context without claiming a live Desktop state. */

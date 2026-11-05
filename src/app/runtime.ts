@@ -19,6 +19,7 @@ import { CodexMonitor, type CodexAutoHandoffResult, type CodexFailureCandidate }
 import { CodexRouter } from './codex-router.ts'
 import { CodexControl } from './codex-control.ts'
 import { CodexDelivery } from './codex-delivery.ts'
+import { CodexSupervision } from './codex-supervision.ts'
 import { registerGithubShellEnv } from './github-shell-env.ts'
 import { lockSync } from 'proper-lockfile'
 import { Engine, key, type EngineForSettings, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
@@ -96,6 +97,7 @@ export class Runtime extends Service implements SourceHost {
   readonly codexRouter: CodexRouter
   readonly codexControl: CodexControl
   private readonly codexDelivery: CodexDelivery
+  private readonly codexSupervision: CodexSupervision
   /** Non-zero while a main-Session tool is executing an Engine command, suppressing self-triggered domain event notices. */
   private quiet = 0
   constructor(ctx: Context, readonly machine: Machine, restart: () => void) {
@@ -113,9 +115,12 @@ export class Runtime extends Service implements SourceHost {
       this.codexControl = new CodexControl({ store, stateDir: machine.stateDir })
       this.codexMonitor = new CodexMonitor({ store, context: ctx,
         autoHandoff: (candidate, signal) => this.intakeCodexFailure(candidate, signal),
-        onScan: () => { try { this.codexControl.sync(); this.codexRouter.refresh(); void this.codexDelivery.request().catch(report) }
+        onScan: () => { try { this.codexControl.sync(); this.codexSupervision.refresh(); this.codexRouter.refresh(); void this.codexDelivery.request().catch(report) }
           catch (error) { ctx.logger.warn('dsh-superagent Codex Router refresh failed: %s', String(error)) } } })
       this.codexRouter = new CodexRouter({ store, monitor: this.codexMonitor,
+        relay: (id, text) => this.sessions.relay(id, text) })
+      this.codexSupervision = new CodexSupervision({ control: this.codexControl, monitor: this.codexMonitor,
+        paused: () => this.paused() || !this.codexMonitor.view(0, 1).enabled,
         relay: (id, text) => this.sessions.relay(id, text) })
       const setup = this.setup = new Setup({ context: ctx, machine, lifetime: this.lifetime, restart })
       const deployed = () => setup.configured()
@@ -217,7 +222,7 @@ export class Runtime extends Service implements SourceHost {
         get deployment() { return setup.deployment }, configured: () => setup.configured(),
         get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem }, receive: trigger => passes.receive(trigger) }
       this.toolHost = { context: ctx, engine, store, prompts, sessions, settings: this.settings, assessor, resources,
-        codexMonitor: this.codexMonitor, codexControl: this.codexControl,
+        codexMonitor: this.codexMonitor, codexControl: this.codexControl, codexSupervision: this.codexSupervision,
         codexDesktopStatus: (threadId, caller) => this.codexDesktopStatus(threadId, caller),
         requestCodexDelivery: () => { void this.codexDelivery.request() },
         ...(codex ? { codex } : {}),

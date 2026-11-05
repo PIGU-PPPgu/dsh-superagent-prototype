@@ -16,6 +16,22 @@ export const CODEX_VERIFY_MESSAGE = 'DSH Superagent coordination for this existi
   + 'Read your existing history only. Report whether a current human action is still required and quote its exact request. '
   + 'If an old request is resolved, withdrawn or obsolete, state that explicitly with the supporting event; never infer approval. '
   + 'Preserve any human pause. Do not ask the user to repeat an answer just to clear a DSH marker.'
+export interface CodexManagedResponse {
+  itemId: string; turnId: string; headItemId: string; text: string
+  status: string; kind: 'reply'; observedAt: string
+}
+export interface CodexSupervision {
+  phase: 'awaitingReply' | 'needsReview' | 'waiting' | 'continued' | 'completed' | 'stopped'
+  observedTurn?: boolean
+  response?: CodexManagedResponse
+  parentIntentId?: string
+  nextIntentId?: string
+  notifiedAt?: string
+  notifications?: number
+  reviewAt?: string
+  reason?: string
+  decidedAt?: string
+}
 export interface CodexControlIntent {
   id: string
   threadId: string
@@ -35,6 +51,7 @@ export interface CodexControlIntent {
   verificationRequestId?: string
   projectContextId?: string
   delegation?: { goal: string; action: string; doneWhen: string; userItemId: string; project?: string }
+  supervision?: CodexSupervision
 }
 export const isCodexVerification = (intent: Pick<CodexControlIntent, 'operation' | 'text'>): boolean =>
   intent.operation === 'verify' && intent.text === CODEX_VERIFY_MESSAGE
@@ -90,10 +107,13 @@ export class CodexControl {
 
   view(): CodexControlView {
     const state = this.state(), bridge = this.bridge()
+    const managed = (intent: CodexControlIntent) => intent.status === 'sent' && !!intent.supervision
+      && ['awaitingReply', 'needsReview', 'waiting'].includes(intent.supervision.phase)
     return { enabled: state.enabled, token: state.token ?? 0, bridgeReady: !!bridge,
       ...(bridge ? { bridgeSeenAt: bridge.at } : {}), intents: Object.values(state.intents)
-        .sort((a, b) => Number(active(b.status)) - Number(active(a.status)) || b.priority - a.priority
-          || b.createdAt.localeCompare(a.createdAt)) }
+        .sort((a, b) => Number(active(b.status) || managed(b)) - Number(active(a.status) || managed(a))
+          || (active(a.status) || managed(a) ? b.priority - a.priority : 0)
+          || b.updatedAt.localeCompare(a.updatedAt) || b.createdAt.localeCompare(a.createdAt)) }
   }
   setEnabled(enabled: boolean): CodexControlView {
     return this.locked(() => {
@@ -181,7 +201,8 @@ export class CodexControl {
   }
   enqueue(input: { threadId: string; basedOnItemId: string; text: string; reason: string; priority?: number;
     source: 'router' | 'panel'; operation?: 'interrupt' | 'verify'; expectedTurnId?: string; verificationRequestId?: string;
-    projectContextId?: string; delegation?: CodexControlIntent['delegation']; token?: number }): CodexControlIntent {
+    projectContextId?: string; delegation?: CodexControlIntent['delegation'];
+    reviewIntentId?: string; responseItemId?: string; token?: number }): CodexControlIntent {
     const token = input.token ?? this.state().token ?? 0
     const threadId = CodexIdSchema.parse(input.threadId)
     const basedOnItemId = CodexIdSchema.parse(input.basedOnItemId)
@@ -214,7 +235,23 @@ export class CodexControl {
           && intent.operation === input.operation && intent.expectedTurnId === expectedTurnId)
         if (this.ownedThreads().has(threadId)) throw new Error('An active DSH Ticket owns this Codex conversation')
         const existing = matches.find(intent => active(intent.status) || intent.status === 'sent')
-        if (existing) return existing
+        const parent = input.reviewIntentId ? state.intents[input.reviewIntentId] : undefined
+        if (existing && (!input.reviewIntentId || parent?.supervision?.nextIntentId === existing.id
+          && existing.supervision?.parentIntentId === parent.id && parent.supervision.response?.itemId === input.responseItemId)) return existing
+        if (input.reviewIntentId) {
+          if (!parent || parent.threadId !== threadId || parent.status !== 'sent'
+            || !parent.supervision?.response || parent.supervision.response.itemId !== input.responseItemId
+            || !['needsReview', 'waiting'].includes(parent.supervision.phase)
+            || parent.supervision.response.headItemId !== basedOnItemId) throw new Error('Managed reply changed or was already handled; read the head again')
+          if (!delegation || input.operation || parent.delegation?.goal !== delegation.goal || parent.delegation.doneWhen !== delegation.doneWhen) {
+            throw new Error('Continue the existing goal and completion condition unchanged; stop the old goal explicitly before replacing it')
+          }
+        }
+        const openGoal = Object.values(state.intents).find(intent => intent.threadId === threadId && intent.status === 'sent'
+          && intent.supervision && ['awaitingReply', 'needsReview', 'waiting'].includes(intent.supervision.phase))
+        if (!input.operation && delegation && openGoal && openGoal.id !== parent?.id) {
+          throw new Error('Review the existing managed reply before dispatching another step')
+        }
         if (Object.values(state.intents).some(intent => intent.threadId === threadId && active(intent.status))) {
           throw new Error('This Codex conversation already has a pending router intent')
         }
@@ -229,13 +266,66 @@ export class CodexControl {
           ...(input.operation ? { operation: input.operation, expectedTurnId } : {}),
           ...(verificationRequestId ? { verificationRequestId } : {}) }
         if (projectContextId) intent.projectContextId = projectContextId
-        if (delegation) intent.delegation = delegation
-        this.save({ ...state, intents: { ...state.intents, [id]: intent } })
+        if (delegation) {
+          intent.delegation = delegation
+          intent.supervision = { phase: 'awaitingReply', ...(parent ? { parentIntentId: parent.id } : {}) }
+        }
+        const intents = { ...state.intents, [id]: intent }
+        if (parent?.supervision) intents[parent.id] = { ...parent, updatedAt: at,
+          supervision: { ...parent.supervision, phase: 'continued', nextIntentId: id, decidedAt: at, reason } }
+        this.save({ ...state, intents })
         return intent
       })
       this.writeQueue()
       return result
     })
+  }
+
+  observeManagedTurn(id: string): void {
+    this.locked(() => this.update(id, value => value.supervision && !value.supervision.observedTurn
+      ? { ...value, supervision: { ...value.supervision, observedTurn: true } } : value))
+  }
+
+  observeManagedResponse(id: string, response: CodexManagedResponse): void {
+    this.locked(() => this.update(id, value => {
+      const review = value.supervision
+      if (value.status !== 'sent' || !review || !['awaitingReply', 'needsReview', 'waiting'].includes(review.phase)) return value
+      if (value.turnId !== response.turnId) throw new Error('Codex reply belongs to another turn')
+      if (review.response?.itemId === response.itemId) return review.response.headItemId === response.headItemId
+        ? value : { ...value, supervision: { ...review, response } }
+      return { ...value, supervision: { ...review, phase: 'needsReview', response,
+        notifiedAt: undefined, notifications: 0, reviewAt: undefined } }
+    }))
+  }
+
+  notifyManagedReview(id: string, emit: (intent: CodexControlIntent) => void, canNotify: () => boolean = () => true): boolean {
+    return this.locked(() => this.deps.store.atomic(() => {
+      const before = this.state().intents[id], review = before?.supervision, now = this.now()
+      if (!this.state().enabled || !canNotify() || !review?.response || !['needsReview', 'waiting'].includes(review.phase)
+        || review.reviewAt && Date.parse(review.reviewAt) > Date.parse(now)) return false
+      const attempt = (review.notifications ?? 0) + 1
+      const value = this.update(id, previous => ({ ...previous, supervision: { ...review, phase: 'needsReview',
+        notifiedAt: now, notifications: attempt, reviewAt: new Date(Date.parse(now) + Math.min(120_000 * 2 ** Math.min(attempt - 1, 3), 900_000)).toISOString() } }))
+      emit(value)
+      return true
+    }))
+  }
+
+  decideManagedReview(id: string, responseItemId: string | undefined, decision: 'complete' | 'wait' | 'stop', reason: string, retryAfter = 120): CodexControlIntent {
+    const why = z.string().trim().min(1).max(300).parse(reason)
+    z.number().int().min(30).max(900).parse(retryAfter)
+    return this.locked(() => this.update(id, value => {
+      const review = value.supervision
+      if (!review || value.status !== 'sent' || !['awaitingReply', 'needsReview', 'waiting'].includes(review.phase)) {
+        throw new Error('Managed step was already handled')
+      }
+      if (decision !== 'stop' && (!review.response || review.response.itemId !== responseItemId)
+        || decision === 'stop' && responseItemId && review.response?.itemId !== responseItemId) throw new Error('Review the current Codex reply before deciding')
+      const at = this.now()
+      return { ...value, updatedAt: at, supervision: { ...review,
+        phase: decision === 'complete' ? 'completed' : decision === 'wait' ? 'waiting' : 'stopped', reason: why, decidedAt: at,
+        ...(decision === 'wait' ? { reviewAt: new Date(Date.parse(at) + retryAfter * 1000).toISOString() } : {}) } }
+    }))
   }
   reorder(id: string, priority: number): CodexControlIntent {
     z.number().int().min(0).max(3).parse(priority)
