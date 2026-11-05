@@ -43,6 +43,7 @@ interface StoredThread extends MonitoredCodexThread {
   lastItemId?: string
   lastAssistantItemId?: string
   userDecisionRequested?: boolean
+  unverifiedRequestId?: string
   userHold?: boolean
   latestTurnId?: string
   latestTurnStatus?: string
@@ -206,8 +207,16 @@ export interface CodexMonitorDeps {
 
 const initial = (): StoredMonitor => ({ version: 1, enabled: false, initialized: false, threads: {} })
 const errorText = (_error: unknown) => 'Codex inventory unavailable'
-const humanRequestId = (row: StoredThread): string | undefined => row.attention?.decision.stage === 'needsYou'
-  ? key('codex-human-request', row.id, row.attention.itemId, row.attention.requestKey ?? row.attention.decision.evidence ?? '') : undefined
+function humanRequestId(row: StoredThread): string | undefined {
+  if (row.attention?.decision.stage === 'needsYou') return key('codex-human-request', row.id,
+    row.attention.itemId, row.attention.requestKey ?? row.attention.decision.evidence ?? '')
+  if (!row.userDecisionRequested) return undefined
+  if (row.unverifiedRequestId) return row.unverifiedRequestId
+  if (row.attention) return undefined
+  const assessment = row.assessment
+  return assessment?.decision.stage === 'unknown' && assessment.decision.reason === '历史请求未确认' && assessment.decision.evidence
+    ? key('codex-historical-request', row.id, assessment.itemId, assessment.decision.evidence) : undefined
+}
 
 /** A person's explicit pause survives status questions and DSH coordination messages. */
 function userHold(messages: readonly StoredMessage[], held = false): boolean {
@@ -321,8 +330,10 @@ export class CodexMonitor {
       ...(row.assessment?.decision.stage ? { stage: row.assessment.decision.stage } : {}),
       ...(row.assessment?.itemId ? { assessmentItemId: row.assessment.itemId } : {}),
       needsYou: row.assessment?.decision.stage === 'needsYou' || row.userDecisionRequested === true || row.userHold === true,
-      ...(!row.userHold && row.assessment?.decision.stage !== 'needsYou' && row.attention?.decision.stage === 'needsYou' && !row.attention.acknowledgedAt
-        && !row.context.some(message => message.role === 'assistant' && message.id === row.attention?.itemId)
+      ...(!row.userHold && row.assessment?.decision.stage !== 'needsYou' && humanRequestId(row)
+        && (!row.attention || row.unverifiedRequestId && row.attention.decision.stage !== 'needsYou'
+          || row.attention.decision.stage === 'needsYou' && !row.attention.acknowledgedAt
+          && !row.context.some(message => message.role === 'assistant' && message.id === row.attention?.itemId))
         ? { verificationRequestId: humanRequestId(row) } : {}),
       ...(row.userHold ? { pausedByUser: true } : {}) }
   }
@@ -762,6 +773,10 @@ export class CodexMonitor {
             ...(recent.latestTurnStatus ? { latestTurnStatus: recent.latestTurnStatus } : {}),
             ...(assessment ? { assessment } : {}),
             ...(attention ? { attention } : {}) }
+          if (userDecisionRequested && attention?.decision.stage !== 'needsYou') {
+            const requestId = previous && humanRequestId(previous) || humanRequestId(next)
+            if (requestId) next.unverifiedRequestId = requestId
+          }
         } catch (error) {
           if (signal.aborted) throw error
           next = { ...(previous ?? { ...candidate, context: [] }), ...candidate,

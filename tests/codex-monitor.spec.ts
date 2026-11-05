@@ -269,6 +269,52 @@ it('suppresses an unverified old question while preserving its control guard', a
 })
 
 it.each([
+  ['此前的人工请求已失效，原请求只是当时的安装选择。', false, 'progress'],
+  ['旧请求目前无法确认是否失效。', true, 'progress'],
+  ['当前仍请你批准新增仓库权限。', true, 'progress'],
+  ['此前的人工请求已解决。', false, 'blocked'],
+  ['此前的人工请求已解决。', false, 'failed'],
+])('verifies a historical baseline guard without an attention row: %s after %s', async (reply, needsYou, intermediate) => {
+  const { store, monitor, rpc, setDecision, advanceMinutes } = fixture()
+  monitor.setEnabled(true); await monitor.scanOnce()
+  const saved = JSON.parse(store.db.prepare("select value from kv where key='codex-monitor-v1'").get()!.value as string)
+  const row = saved.threads['thread-a']
+  delete row.attention
+  row.userDecisionRequested = true
+  row.assessment = { version: 4, itemId: 'answer-old', decision: { needsAttention: false, stage: 'unknown', kind: 'none',
+    reason: '历史请求未确认', action: '无需处理', evidence: '当时的安装选择' } }
+  store.set('codex-monitor-v1', saved)
+  const requestId = monitor.routeHead('thread-a')!.verificationRequestId!
+  expect(requestId).toMatch(/^[a-f0-9]{32}$/)
+  expect(monitor.routeHead('thread-a')?.needsYou).toBe(true)
+  const original = rpc.request.getMockImplementation()!, extra: unknown[] = []
+  rpc.request.mockImplementation(async (method, params, signal) => {
+    const result = await original(method, params, signal)
+    return method === 'thread/items/list' ? { ...(result as { data: unknown[] }),
+      data: [...extra, ...(result as { data: unknown[] }).data] } : result
+  })
+  extra.unshift({ turnId: 'verification-turn', item: { id: 'verification-user', type: 'userMessage',
+    content: [{ type: 'text', text: CODEX_VERIFY_MESSAGE }] } })
+  setDecision(progressDecision); advanceMinutes(6); await monitor.scanOnce()
+  expect(monitor.routeHead('thread-a')).toMatchObject({ needsYou: true, verificationRequestId: requestId })
+  store.set('codex-control-v1', { version: 1, enabled: true, intents: { verify: {
+    id: 'verify', threadId: 'thread-a', basedOnItemId: 'answer-old', operation: 'verify', text: CODEX_VERIFY_MESSAGE,
+    reason: '核实旧基线', priority: 1, status: 'sent', source: 'router', createdAt: '', updatedAt: '',
+    turnId: 'verification-turn', verificationRequestId: requestId } } })
+  const interimText = intermediate === 'progress' ? '正在核对旧请求。' : '缓存不足，正在核对旧请求。'
+  if (intermediate !== 'progress') setDecision(JSON.stringify({ needsAttention: true, stage: intermediate,
+    kind: intermediate === 'blocked' ? 'blocked' : 'failure', reason: '缓存不足', action: '核对缓存', evidence: '缓存不足' }))
+  extra.unshift({ turnId: 'verification-turn', item: { id: 'verification-progress', type: 'agentMessage', text: interimText } })
+  advanceMinutes(6); await monitor.scanOnce()
+  expect(monitor.routeHead('thread-a')).toMatchObject({ needsYou: true, verificationRequestId: requestId })
+  setDecision(progressDecision)
+  extra.unshift({ turnId: 'verification-turn', item: { id: 'verification-result', type: 'agentMessage', text: reply } })
+  advanceMinutes(6); await monitor.scanOnce()
+  expect(monitor.routeHead('thread-a')?.needsYou).toBe(needsYou)
+  if (reply.includes('批准')) expect(monitor.routeHead('thread-a')?.verificationRequestId).toBeUndefined()
+})
+
+it.each([
   ['confirmed resolution', '此前的人工请求已解决，原请求仅针对已合并的补丁。当前构建缓存不足。', true, 'verify-turn', false, 'sent'],
   ['explicit already resolved', '此前的人工请求已经解决，原请求仅针对已合并的补丁。', true, 'verify-turn', false, 'sent'],
   ['English resolution', 'The previous human request is resolved. Only read-only diagnosis remains.', true, 'verify-turn', false, 'sent'],
