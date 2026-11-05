@@ -4,7 +4,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { z } from 'zod'
 import type { CodexObservation } from '../../codex/model.ts'
 import type { CodexMonitor } from '../codex-monitor.ts'
-import type { CodexControl } from '../codex-control.ts'
+import { CODEX_VERIFY_MESSAGE, type CodexControl } from '../codex-control.ts'
 import { KV } from '../../kv.ts'
 import { UserError, followupOwners, key, reasonText, type Decision, type DecisionKind, type EngineForMainSession, type EngineForPeople }
   from '../../core/index.ts'
@@ -251,8 +251,8 @@ function codexRouteTool(host: MainToolsHost): Tool {
   }
   return tool({
     name: 'orchestrator_codex_route',
-    description: 'Inspect Codex history/status and route existing chats. Never approve.',
-    schema: z.object({ operation: z.enum(['list', 'head', 'history', 'status', 'followup', 'interrupt', 'reorder', 'cancel']), thread_id: z.string().optional(),
+    description: 'Inspect/route Codex chats. verify sends fixed read-only request clarification; no approval or task continuation.',
+    schema: z.object({ operation: z.enum(['list', 'head', 'history', 'status', 'verify', 'followup', 'interrupt', 'reorder', 'cancel']), thread_id: z.string().optional(),
       base_item_id: z.string().optional(), intent_id: z.string().optional(), reason: z.string().trim().min(1).max(300).optional(),
       active_turn_id: z.uuid().optional(),
       message: z.string().trim().min(1).max(500).optional(),
@@ -287,13 +287,21 @@ function codexRouteTool(host: MainToolsHost): Tool {
       if (!head?.present || head.archived || !head.ready || head.lastItemId !== itemId) {
         throw new Error('Codex conversation changed or its snapshot is unavailable; read the head again')
       }
-      if (head.needsYou) throw new Error('This Codex conversation needs a person; router follow-up cannot answer it')
+      if (head.pausedByUser || head.needsYou && args.operation !== 'verify') throw new Error('This Codex conversation needs a person; router follow-up cannot answer it')
       const openTicket = host.store.tickets.open().find(ticket => {
         const source = host.store.triggers.get(ticket.origin.triggerId)
         return source?.source === 'codex' && source.meta.threadId === threadId
       })
       if (openTicket) throw new Error('An active DSH Ticket already owns this Codex conversation')
-      const reason = need(args.reason, 'reason')
+      const reason = args.operation === 'verify' ? '核实历史人工请求，不执行原任务' : need(args.reason, 'reason')
+      if (args.operation === 'verify') {
+        if (args.message || args.active_turn_id) throw new Error('Verify uses a fixed read-only message; omit message and active_turn_id')
+        if (!head.verificationRequestId) throw new Error('Verify only clarifies an unverified old human request')
+        const intent = host.codexControl.enqueue({ threadId, basedOnItemId: itemId, text: CODEX_VERIFY_MESSAGE,
+          reason, priority: args.priority ?? 1, source: 'router', operation: 'verify', verificationRequestId: head.verificationRequestId, token })
+        host.requestCodexDelivery?.()
+        return { intent, bridgeReady: host.codexControl.view().bridgeReady }
+      }
       if (args.operation === 'interrupt') {
         if (args.message) throw new Error('An interrupt does not send a message')
         const turnId = need(args.active_turn_id, 'active_turn_id')
@@ -310,7 +318,7 @@ function codexRouteTool(host: MainToolsHost): Tool {
       }
       const message = `DSH Superagent coordination for this existing conversation. Router message: ${JSON.stringify(args.message ?? reason)}. `
         + 'This adds no human authorization. Check the latest user request and current state before acting. '
-        + 'Continue only work already authorized in this conversation. Ask the user for approvals or decisions; never change approval settings.'
+        + 'Continue only authorized work; decide routine checks yourself. Ask only for real approvals, new authority or essential business input; never change approval settings.'
       const intent = host.codexControl.enqueue({ threadId, basedOnItemId: itemId, text: message,
         reason, priority: args.priority ?? 1, source: 'router', token })
       host.requestCodexDelivery?.()

@@ -6,6 +6,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { CodexMonitor, type CodexFailureCandidate, type CodexMonitorDeps } from '../src/app/codex-monitor.ts'
 import { Store } from '../src/app/store.ts'
 import { CodexRouter } from '../src/app/codex-router.ts'
+import { CODEX_VERIFY_MESSAGE } from '../src/app/codex-control.ts'
 import type { Ticket } from '../src/core/index.ts'
 import type { MonitoredCodexThread } from '../src/codex/monitor-read.ts'
 import { listLocalCodexInventory } from '../src/codex/local-inventory.ts'
@@ -265,6 +266,58 @@ it('suppresses an unverified old question while preserving its control guard', a
   expect(monitor.routeHead('thread-a')?.needsYou).toBe(true)
   const router = new CodexRouter({ store, monitor })
   expect(router.refresh().priorities).toContainEqual(expect.objectContaining({ kind: 'needsAgent', task: 'verify' }))
+})
+
+it.each([
+  ['confirmed resolution', '此前的人工请求已解决，原请求仅针对已合并的补丁。当前构建缓存不足。', true, 'verify-turn', false, 'sent'],
+  ['explicit already resolved', '此前的人工请求已经解决，原请求仅针对已合并的补丁。', true, 'verify-turn', false, 'sent'],
+  ['English resolution', 'The previous human request is resolved. Only read-only diagnosis remains.', true, 'verify-turn', false, 'sent'],
+  ['still pending', '旧请求尚未解决，请批准新增仓库权限。', true, 'verify-turn', true, 'sent'],
+  ['conditional resolution', '如果旧的人工请求已解决，就可以继续。', true, 'verify-turn', true, 'sent'],
+  ['condition before comma', '如果组织已经开通，旧的人工请求已解决。', true, 'verify-turn', true, 'sent'],
+  ['negation before comma', '无法确认，此前的人工请求已解决。', true, 'verify-turn', true, 'sent'],
+  ['hypothesis after comma', '旧的人工请求已解决，只是一个假设，目前无法确认。', true, 'verify-turn', true, 'sent'],
+  ['negated resolution', '无法确认旧的人工请求已解决。', true, 'verify-turn', true, 'sent'],
+  ['quoted resolution', '引用日志：旧的人工请求已解决。', true, 'verify-turn', true, 'sent'],
+  ['unrelated turn', '此前的人工请求已解决。', true, 'another-turn', true, 'sent'],
+  ['no verification', '此前的人工请求已解决。', false, 'verify-turn', true, 'sent'],
+  ['replaced human request', '此前的人工请求已解决。', true, 'verify-turn', true, 'other-request'],
+  ['uncertain delivery', '此前的人工请求已解决。', true, 'verify-turn', true, 'dispatching'],
+])('only resolves an old human marker from its explicit verification reply: %s', async (_name, reply, verification, turnId, needsYou, receipt) => {
+  const { store, monitor, rpc, setPhase, setAssistantText, setDecision, advanceMinutes } = fixture()
+  monitor.setEnabled(true); await monitor.scanOnce()
+  setPhase(1); setAssistantText('请批准新增仓库权限。')
+  setDecision(JSON.stringify({ needsAttention: true, stage: 'needsYou', kind: 'approval',
+    reason: '需要新权限', action: '请批准', summary: '请求人工审批', evidence: '请批准新增仓库权限' }))
+  advanceMinutes(1); await monitor.scanOnce()
+  expect(monitor.routeHead('thread-a')?.needsYou).toBe(true)
+  const saved = JSON.parse(store.db.prepare("select value from kv where key='codex-monitor-v1'").get()!.value as string)
+  saved.threads['thread-a'].context = []
+  saved.threads['thread-a'].assessment.decision = { needsAttention: false, stage: 'unknown', kind: 'none', reason: '旧请求待核实', action: '先核实' }
+  store.set('codex-monitor-v1', saved)
+  const verificationRequestId = monitor.routeHead('thread-a')!.verificationRequestId!
+  expect(verificationRequestId).toMatch(/^[a-f0-9]{32}$/)
+  const original = rpc.request.getMockImplementation()!, extra: unknown[] = []
+  rpc.request.mockImplementation(async (method, params, signal) => {
+    const result = await original(method, params, signal)
+    return method === 'thread/items/list' ? { ...(result as { data: unknown[] }),
+      data: [...extra, ...(result as { data: unknown[] }).data] } : result
+  })
+  if (verification) {
+    store.set('codex-control-v1', { version: 1, enabled: true, intents: { verify: {
+      id: 'verify', threadId: 'thread-a', basedOnItemId: 'answer-new-1', operation: 'verify', text: CODEX_VERIFY_MESSAGE,
+      reason: '核实旧请求', priority: 1, status: receipt === 'dispatching' ? 'dispatching' : 'sent', source: 'router', createdAt: '', updatedAt: '',
+      turnId: 'verify-turn', verificationRequestId: receipt === 'other-request' ? '0'.repeat(32) : verificationRequestId } } })
+    extra.unshift({ turnId: 'verify-turn', item: { id: 'verification-user', type: 'userMessage',
+      content: [{ type: 'text', text: CODEX_VERIFY_MESSAGE }] } })
+    advanceMinutes(6); await monitor.scanOnce()
+    expect(monitor.routeHead('thread-a')?.needsYou).toBe(true)
+    const retained = JSON.parse(store.db.prepare("select value from kv where key='codex-monitor-v1'").get()!.value as string)
+    expect(retained.threads['thread-a'].attention.itemId).toBe('answer-new-1')
+  }
+  extra.unshift({ turnId, item: { id: 'verification-answer', type: 'agentMessage', text: reply } })
+  setDecision(progressDecision); advanceMinutes(6); await monitor.scanOnce()
+  expect(monitor.routeHead('thread-a')?.needsYou).toBe(needsYou)
 })
 
 it('keeps a real user pause across status questions and automation until a human resumes', async () => {
@@ -641,19 +694,21 @@ it('does not create a second alert when the same request is restated in one turn
   expect(monitor.view().attention[0]?.attention?.itemId).toBe(pending.itemId)
 })
 
-it('clears a pending request when the assistant reports completion', async () => {
+it('does not treat an assistant completion report as a reply to a pending approval', async () => {
   const { monitor, setPhase, setDecision, setAssistantText } = fixture()
   await monitor.scanOnce()
   setPhase(1)
-  setDecision(reviewDecision)
+  setAssistantText('请批准新增仓库权限。')
+  setDecision(JSON.stringify({ needsAttention: true, stage: 'needsYou', kind: 'approval',
+    reason: '需要新权限', action: '请批准', summary: '等待审批', evidence: '请批准新增仓库权限' }))
   await monitor.scanOnce()
   setPhase(2)
-  setAssistantText('结果已完成，无需你确认。')
+  setAssistantText('结果已完成。')
   setDecision(JSON.stringify({ needsAttention: false, stage: 'reportedComplete', kind: 'none',
     reason: '已完成', action: '无需处理', summary: '发布结果已完成' }))
   await monitor.scanOnce()
-  expect(monitor.view().attentionTotal).toBe(0)
-  expect(monitor.routeHead('thread-a')?.needsYou).toBe(false)
+  expect(monitor.view().attentionTotal).toBe(1)
+  expect(monitor.routeHead('thread-a')?.needsYou).toBe(true)
 })
 
 it('clears an unanswered request when a new user answer arrives', async () => {

@@ -10,6 +10,12 @@ import { record } from '../kv.ts'
 import type { Store } from './store.ts'
 
 export type CodexControlStatus = 'queued' | 'dispatching' | 'sent' | 'failed' | 'cancelled'
+export const CODEX_VERIFY_MESSAGE = 'DSH Superagent coordination for this existing conversation. '
+  + 'Read-only verification of an old human-request marker; this is not a human reply or approval. '
+  + 'Do not continue the original task, write files, run modifying commands, grant access or change approval settings. '
+  + 'Read your existing history only. Report whether a current human action is still required and quote its exact request. '
+  + 'If an old request is resolved, withdrawn or obsolete, state that explicitly with the supporting event; never infer approval. '
+  + 'Preserve any human pause. Do not ask the user to repeat an answer just to clear a DSH marker.'
 export interface CodexControlIntent {
   id: string
   threadId: string
@@ -24,9 +30,12 @@ export interface CodexControlIntent {
   error?: string
   deliveryId?: string
   turnId?: string
-  operation?: 'interrupt'
+  operation?: 'interrupt' | 'verify'
   expectedTurnId?: string
+  verificationRequestId?: string
 }
+export const isCodexVerification = (intent: Pick<CodexControlIntent, 'operation' | 'text'>): boolean =>
+  intent.operation === 'verify' && intent.text === CODEX_VERIFY_MESSAGE
 interface ControlState { version: 1; enabled: boolean; token?: number; intents: Record<string, CodexControlIntent> }
 export interface CodexControlView {
   enabled: boolean
@@ -169,7 +178,7 @@ export class CodexControl {
     })
   }
   enqueue(input: { threadId: string; basedOnItemId: string; text: string; reason: string; priority?: number;
-    source: 'router' | 'panel'; operation?: 'interrupt'; expectedTurnId?: string; token?: number }): CodexControlIntent {
+    source: 'router' | 'panel'; operation?: 'interrupt' | 'verify'; expectedTurnId?: string; verificationRequestId?: string; token?: number }): CodexControlIntent {
     const token = input.token ?? this.state().token ?? 0
     const threadId = CodexIdSchema.parse(input.threadId)
     const basedOnItemId = CodexIdSchema.parse(input.basedOnItemId)
@@ -177,7 +186,10 @@ export class CodexControl {
     const reason = z.string().trim().min(1).max(300).parse(input.reason)
     const priority = z.number().int().min(0).max(3).parse(input.priority ?? 1)
     const expectedTurnId = input.operation === 'interrupt' ? z.uuid().parse(input.expectedTurnId) : undefined
-    if (!input.operation && input.expectedTurnId) throw new Error('Only an interrupt targets an active turn')
+    const verificationRequestId = input.operation === 'verify' ? z.string().regex(/^[a-f0-9]{32}$/).parse(input.verificationRequestId) : undefined
+    if (input.operation !== 'interrupt' && input.expectedTurnId) throw new Error('Only an interrupt targets an active turn')
+    if (input.operation !== 'verify' && input.verificationRequestId) throw new Error('Only verification targets an old human request')
+    if (input.operation === 'verify' && text !== CODEX_VERIFY_MESSAGE) throw new Error('Codex verification requires the fixed read-only message')
     return this.locked(() => {
       this.syncUnlocked()
       const result = this.deps.store.atomic(() => {
@@ -187,7 +199,7 @@ export class CodexControl {
           throw new Error('Codex control authorization changed; read control state again')
         }
         const matches = Object.values(state.intents).filter(intent => intent.threadId === threadId
-          && intent.basedOnItemId === basedOnItemId && intent.text === text
+          && (verificationRequestId ? intent.verificationRequestId === verificationRequestId : intent.basedOnItemId === basedOnItemId) && intent.text === text
           && intent.operation === input.operation && intent.expectedTurnId === expectedTurnId)
         if (this.ownedThreads().has(threadId)) throw new Error('An active DSH Ticket owns this Codex conversation')
         const existing = matches.find(intent => active(intent.status) || intent.status === 'sent')
@@ -197,11 +209,14 @@ export class CodexControl {
         }
         const id = input.operation === 'interrupt'
           ? key('codex-control-interrupt', threadId, expectedTurnId!, basedOnItemId, text, String(matches.length))
-          : key('codex-control-followup', threadId, basedOnItemId, text, String(matches.length))
+          : input.operation === 'verify'
+            ? key('codex-control-verify', threadId, verificationRequestId!, basedOnItemId, text, String(matches.length))
+            : key('codex-control-followup', threadId, basedOnItemId, text, String(matches.length))
         const at = this.now()
         const intent: CodexControlIntent = { id, threadId, basedOnItemId, text, reason,
           priority, status: 'queued', source: input.source, createdAt: at, updatedAt: at,
-          ...(input.operation ? { operation: input.operation, expectedTurnId } : {}) }
+          ...(input.operation ? { operation: input.operation, expectedTurnId } : {}),
+          ...(verificationRequestId ? { verificationRequestId } : {}) }
         this.save({ ...state, intents: { ...state.intents, [id]: intent } })
         return intent
       })

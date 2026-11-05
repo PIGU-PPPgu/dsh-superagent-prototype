@@ -2,7 +2,8 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
-import { CodexControl } from '../src/app/codex-control.ts'
+import { CodexControl, CODEX_VERIFY_MESSAGE } from '../src/app/codex-control.ts'
+import type { CodexRouteHead } from '../src/app/codex-monitor.ts'
 import { CodexDelivery } from '../src/app/codex-delivery.ts'
 import { Store } from '../src/app/store.ts'
 import { CodexDesktopIpcError, type CodexDesktopState } from '../src/codex/desktop-ipc.ts'
@@ -21,7 +22,7 @@ function fixture() {
       turnId: 'turn-a', settingsPreserved: true as boolean | undefined })),
     startText: vi.fn(async (_state: CodexDesktopState, _text: string, id: string, _signal?: AbortSignal, _canSend?: () => boolean) => ({
       clientUserMessageId: id, turnId: 'turn-a', settingsPreserved: true as boolean | undefined })) }
-  const monitor = { routeHead: vi.fn(() => ({ threadId: 'thread-a', title: 'Task', present: true,
+  const monitor = { routeHead: vi.fn((): CodexRouteHead => ({ threadId: 'thread-a', title: 'Task', present: true,
     archived: false, ready: true, needsYou: false, lastItemId: 'head-a' })),
     readHistory: vi.fn(async () => ({ threadId: 'thread-a', title: 'Task', source: 'persisted Codex history' as const,
       readAt: '', complete: false, headItemId: 'head-a', messages: [] })) }
@@ -182,4 +183,129 @@ it('holds queued work during a DSH pause, including a pause during final send pr
   expect(test.control.view().intents[0]).toMatchObject({ status: 'queued' })
   expect(test.control.view().intents[0]).not.toHaveProperty('deliveryId')
   expect(test.relay).not.toHaveBeenCalled()
+})
+
+it('sends fixed verify once to needsYou with matching verificationRequestId, refuses ordinary followup and mismatched ID', async () => {
+  const test = fixture(); test.control.setEnabled(true)
+  const requestId = '0123456789abcdef0123456789abcdef'
+  test.monitor.routeHead.mockReturnValue({ threadId: 'thread-a', title: 'Task', present: true,
+    archived: false, ready: true, needsYou: true, verificationRequestId: requestId, lastItemId: 'head-a' })
+  const verify = test.control.enqueue({ threadId: 'thread-a', basedOnItemId: 'head-a',
+    text: CODEX_VERIFY_MESSAGE, reason: 'DSH verification', source: 'router', operation: 'verify', verificationRequestId: requestId })
+  await test.delivery.request()
+  expect(test.control.view().intents[0]).toMatchObject({ id: verify.id, status: 'sent' })
+  expect(test.client.startText).toHaveBeenCalledOnce()
+  const followup = test.enqueue()
+  await test.delivery.request()
+  expect(test.control.view().intents.find(row => row.id === followup.id)).toMatchObject({ status: 'failed', error: 'person-required' })
+  expect(test.client.startText).toHaveBeenCalledOnce()
+  const wrongId = test.control.enqueue({ threadId: 'thread-a', basedOnItemId: 'head-a',
+    text: CODEX_VERIFY_MESSAGE, reason: 'DSH verification wrong ID', source: 'router', operation: 'verify', verificationRequestId: 'b'.repeat(32) })
+  await test.delivery.request()
+  expect(test.control.view().intents.find(row => row.id === wrongId.id)).toMatchObject({ status: 'failed', error: 'verification-request-changed' })
+})
+
+it('refuses verify to needsYou without verificationRequestId in head', async () => {
+  const test = fixture(); test.control.setEnabled(true)
+  const requestId = 'c'.repeat(32)
+  test.monitor.routeHead.mockReturnValue({ threadId: 'thread-a', title: 'Task', present: true,
+    archived: false, ready: true, needsYou: true, lastItemId: 'head-a' })
+  test.control.enqueue({ threadId: 'thread-a', basedOnItemId: 'head-a',
+    text: CODEX_VERIFY_MESSAGE, reason: 'DSH verification', source: 'router', operation: 'verify', verificationRequestId: requestId })
+  await test.delivery.request()
+  expect(test.control.view().intents[0]).toMatchObject({ status: 'failed', error: 'verification-request-changed' })
+  expect(test.client.startText).not.toHaveBeenCalled()
+})
+
+it('refuses verify when user paused, approval pending, active, or unknown regardless of verificationRequestId', async () => {
+  const requestId = 'd'.repeat(32)
+  const pausedTest = fixture(); pausedTest.control.setEnabled(true)
+  pausedTest.monitor.routeHead.mockReturnValue({ threadId: 'thread-a', title: 'Task', present: true,
+    archived: false, ready: true, pausedByUser: true, needsYou: false, verificationRequestId: requestId, lastItemId: 'head-a' })
+  pausedTest.control.enqueue({ threadId: 'thread-a', basedOnItemId: 'head-a',
+    text: CODEX_VERIFY_MESSAGE, reason: 'DSH verification', source: 'router', operation: 'verify', verificationRequestId: requestId })
+  await pausedTest.delivery.request()
+  expect(pausedTest.control.view().intents[0]).toMatchObject({ status: 'failed', error: 'stale-history-head' })
+  expect(pausedTest.client.startText).not.toHaveBeenCalled()
+
+  const approvalTest = fixture(); approvalTest.control.setEnabled(true)
+  approvalTest.monitor.routeHead.mockReturnValue({ threadId: 'thread-a', title: 'Task', present: true,
+    archived: false, ready: true, needsYou: true, verificationRequestId: requestId, lastItemId: 'head-a' })
+  approvalTest.state.pendingRequests = 1
+  approvalTest.control.enqueue({ threadId: 'thread-a', basedOnItemId: 'head-a',
+    text: CODEX_VERIFY_MESSAGE, reason: 'DSH verification', source: 'router', operation: 'verify', verificationRequestId: requestId })
+  await approvalTest.delivery.request()
+  expect(approvalTest.control.view().intents[0]?.status).toBe('queued')
+
+  const activeTest = fixture(); activeTest.control.setEnabled(true)
+  activeTest.monitor.routeHead.mockReturnValue({ threadId: 'thread-a', title: 'Task', present: true,
+    archived: false, ready: true, needsYou: true, verificationRequestId: requestId, lastItemId: 'head-a' })
+  activeTest.state.status = 'active'
+  activeTest.control.enqueue({ threadId: 'thread-a', basedOnItemId: 'head-a',
+    text: CODEX_VERIFY_MESSAGE, reason: 'DSH verification', source: 'router', operation: 'verify', verificationRequestId: requestId })
+  await activeTest.delivery.request()
+  expect(activeTest.control.view().intents[0]?.status).toBe('queued')
+
+  const unknownTest = fixture(); unknownTest.control.setEnabled(true)
+  unknownTest.monitor.routeHead.mockReturnValue({ threadId: 'thread-a', title: 'Task', present: true,
+    archived: false, ready: true, needsYou: true, verificationRequestId: requestId, lastItemId: 'head-a' })
+  unknownTest.state.status = 'unknown'
+  unknownTest.control.enqueue({ threadId: 'thread-a', basedOnItemId: 'head-a',
+    text: CODEX_VERIFY_MESSAGE, reason: 'DSH verification', source: 'router', operation: 'verify', verificationRequestId: requestId })
+  await unknownTest.delivery.request()
+  expect(unknownTest.control.view().intents[0]?.status).toBe('failed')
+})
+
+it('blocks verify when verificationRequestId changed after claim or during send', async () => {
+  const requestId = 'e'.repeat(32)
+  const changedTest = fixture(); changedTest.control.setEnabled(true)
+  changedTest.monitor.routeHead.mockReturnValue({ threadId: 'thread-a', title: 'Task', present: true,
+    archived: false, ready: true, needsYou: true, verificationRequestId: requestId, lastItemId: 'head-a' })
+  changedTest.control.enqueue({ threadId: 'thread-a', basedOnItemId: 'head-a',
+    text: CODEX_VERIFY_MESSAGE, reason: 'DSH verification', source: 'router', operation: 'verify', verificationRequestId: requestId })
+  changedTest.client.startText.mockImplementation(async (_state, _text, _id, _signal, canSend) => {
+    changedTest.monitor.routeHead.mockReturnValue({ threadId: 'thread-a', title: 'Task', present: true,
+      archived: false, ready: true, needsYou: true, verificationRequestId: 'f'.repeat(32), lastItemId: 'head-a' })
+    if (!canSend!()) throw new CodexDesktopIpcError('delivery-held')
+    throw new Error('must not reach wire')
+  })
+  await changedTest.delivery.request()
+  expect(changedTest.control.view().intents[0]).toMatchObject({ status: 'queued' })
+  expect(changedTest.control.view().intents[0]).not.toHaveProperty('deliveryId')
+
+  const removedTest = fixture(); removedTest.control.setEnabled(true)
+  removedTest.monitor.routeHead.mockReturnValue({ threadId: 'thread-a', title: 'Task', present: true,
+    archived: false, ready: true, needsYou: true, verificationRequestId: requestId, lastItemId: 'head-a' })
+  removedTest.control.enqueue({ threadId: 'thread-a', basedOnItemId: 'head-a',
+    text: CODEX_VERIFY_MESSAGE, reason: 'DSH verification', source: 'router', operation: 'verify', verificationRequestId: requestId })
+  removedTest.client.startText.mockImplementation(async (_state, _text, _id, _signal, canSend) => {
+    removedTest.monitor.routeHead.mockReturnValue({ threadId: 'thread-a', title: 'Task', present: true,
+      archived: false, ready: true, needsYou: false, lastItemId: 'head-a' })
+    if (!canSend!()) throw new CodexDesktopIpcError('delivery-held')
+    throw new Error('must not reach wire')
+  })
+  await removedTest.delivery.request()
+  expect(removedTest.control.view().intents[0]).toMatchObject({ status: 'queued' })
+})
+
+it('rejects invalid verify with non-fixed text or tampered persistent verificationRequestId', async () => {
+  const requestId = '0123456789abcdef0123456789abcdef'
+  const test = fixture(); test.control.setEnabled(true)
+  test.monitor.routeHead.mockReturnValue({ threadId: 'thread-a', title: 'Task', present: true,
+    archived: false, ready: true, needsYou: true, verificationRequestId: requestId, lastItemId: 'head-a' })
+  expect(() => test.control.enqueue({ threadId: 'thread-a', basedOnItemId: 'head-a',
+    text: 'Custom verify text', reason: 'DSH verification', source: 'router', operation: 'verify', verificationRequestId: 'invalid' }))
+    .toThrow()
+  expect(() => test.control.enqueue({ threadId: 'thread-a', basedOnItemId: 'head-a',
+    text: 'Custom verify text', reason: 'DSH verification', source: 'router', operation: 'verify', verificationRequestId: requestId }))
+    .toThrow('fixed read-only message')
+  const tampered = test.control.enqueue({ threadId: 'thread-a', basedOnItemId: 'head-a',
+    text: CODEX_VERIFY_MESSAGE, reason: 'DSH verification', source: 'router', operation: 'verify', verificationRequestId: requestId })
+  const state = test.control['deps'].store.get('codex-control-v1') as { version: number; enabled: boolean; intents: Record<string, { text: string }> }
+  state.intents[tampered.id]!.text = 'Tampered message'
+  test.control['deps'].store.set('codex-control-v1', state)
+  test.control['syncUnlocked']()
+  await test.delivery.request()
+  expect(test.control.view().intents[0]).toMatchObject({ status: 'failed', error: 'invalid-verification' })
+  expect(test.client.startText).not.toHaveBeenCalled()
 })

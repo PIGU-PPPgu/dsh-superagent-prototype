@@ -12,10 +12,11 @@ import { buildCodexTriagePrompt, currentRequestText, hasUserDecisionRequest, par
   type CodexTriageDecision, type CodexTriageInput,
   type CodexTriageStage } from '../codex/triage.ts'
 import type { Store } from './store.ts'
+import { CODEX_VERIFY_MESSAGE, isCodexVerification, type CodexControlIntent } from './codex-control.ts'
 
 const POLL_MS = 30_000
 const RESCAN_MS = 5 * 60_000
-const ASSESSMENT_VERSION = 5
+const ASSESSMENT_VERSION = 6
 const CONTEXT_MESSAGES = 12
 const CONTEXT_CHARS = 2_000
 const CHILD_STATUS_HOURS = 24
@@ -148,6 +149,7 @@ export interface CodexRouteHead {
   archived: boolean
   needsYou: boolean
   pausedByUser?: boolean
+  verificationRequestId?: string
   ready: boolean
 }
 export interface CodexHistoryView {
@@ -204,6 +206,8 @@ export interface CodexMonitorDeps {
 
 const initial = (): StoredMonitor => ({ version: 1, enabled: false, initialized: false, threads: {} })
 const errorText = (_error: unknown) => 'Codex inventory unavailable'
+const humanRequestId = (row: StoredThread): string | undefined => row.attention?.decision.stage === 'needsYou'
+  ? key('codex-human-request', row.id, row.attention.itemId, row.attention.requestKey ?? row.attention.decision.evidence ?? '') : undefined
 
 /** A person's explicit pause survives status questions and DSH coordination messages. */
 function userHold(messages: readonly StoredMessage[], held = false): boolean {
@@ -317,6 +321,9 @@ export class CodexMonitor {
       ...(row.assessment?.decision.stage ? { stage: row.assessment.decision.stage } : {}),
       ...(row.assessment?.itemId ? { assessmentItemId: row.assessment.itemId } : {}),
       needsYou: row.assessment?.decision.stage === 'needsYou' || row.userDecisionRequested === true || row.userHold === true,
+      ...(!row.userHold && row.assessment?.decision.stage !== 'needsYou' && row.attention?.decision.stage === 'needsYou' && !row.attention.acknowledgedAt
+        && !row.context.some(message => message.role === 'assistant' && message.id === row.attention?.itemId)
+        ? { verificationRequestId: humanRequestId(row) } : {}),
       ...(row.userHold ? { pausedByUser: true } : {}) }
   }
 
@@ -657,7 +664,8 @@ export class CodexMonitor {
           const context = contextOf(previous?.context ?? [], recent.messages)
           const held = userHold(previous?.assessment?.version === ASSESSMENT_VERSION ? recent.messages : context, previous?.userHold)
           const newAssistant = recent.messages.some(message => message.role === 'assistant')
-          const newUser = recent.messages.some(message => message.role === 'user')
+          const newUser = recent.messages.some(message => message.role === 'user'
+            && !message.text.startsWith('DSH Superagent coordination for this existing conversation.'))
           const latestAssistantId = recent.latestAssistantItemId ?? (newAssistant ? undefined : previous?.lastAssistantItemId)
           const latestContext = context.at(-1)
           const latestAssistantText = latestContext?.role === 'assistant'
@@ -707,16 +715,25 @@ export class CodexMonitor {
               ? { decision: visible, at: seenAt, itemId, ...(requestKey ? { requestKey } : {}) } : undefined
             // Keep an unanswered human request visible while retaining the latest technical assessment.
             const reclassified = reconcile && previous?.attention?.itemId === itemId
-            const pending = previous?.attention?.decision.stage === 'needsYou' && !newUser && !reclassified && !held
+            const verificationReply = newAssistant && latestContext?.role === 'assistant' && !!latestContext.turnId
+              && context.some(message => message.role === 'user' && message.turnId === latestContext.turnId && message.text === CODEX_VERIFY_MESSAGE)
+              && Object.values(this.deps.store.get<{ intents: Record<string, CodexControlIntent> }>('codex-control-v1')?.intents ?? {})
+                .some(intent => isCodexVerification(intent) && intent.status === 'sent' && intent.threadId === candidate.id
+                  && intent.turnId === latestContext.turnId && !!previous && intent.verificationRequestId === humanRequestId(previous))
+            const resolved = verificationReply && classified.stage !== 'needsYou' && !assistantRequest
+              && currentRequestText(latestAssistantText ?? '').split(/[。！？!?；;\n.]/).some(clause =>
+                /(?:旧|此前|之前|先前|早先|历史).{0,24}(?:请求|人工待办|审批|确认).{0,16}(?:(?:已|已经)(?:解决|失效|撤销|取消)|不再需要)|\b(?:old|previous|earlier)\s+(?:human\s+|approval\s+)?request\b.{0,40}\b(?:resolved|withdrawn|obsolete|no longer (?:needed|required))\b/i.test(clause)
+                && !/未|没|无法|不能|不是|不确定|如果|假如|假设|或许|可能|只要|除非|一旦|将会|\b(?:not|if|may|might|unless|once|when|would)\b/i.test(clause))
+            const pending = previous?.attention?.decision.stage === 'needsYou' && !newUser && !reclassified && !held && !resolved
             const sameRequest = visible.stage === 'needsYou'
               && previous?.attention?.decision.kind === visible.kind
               && previous.attention.requestKey === requestKey
-            attention = pending && visible.stage !== 'reportedComplete'
-              && (visible.stage !== 'needsYou' || sameRequest) ? previous.attention : latestAttention
+            attention = pending && (visible.stage !== 'needsYou' || sameRequest) ? previous.attention : latestAttention
             userDecisionRequested = !held && (classified.stage === 'needsYou' || !!assistantRequest
-              || !newUser && !reclassified && classified.stage !== 'reportedComplete'
+              || !newUser && !reclassified && !resolved
               && (!!previous?.userDecisionRequested || previous?.attention?.decision.stage === 'needsYou'))
-          } else if ((newUser || reconcile) && context.at(-1)?.role === 'user') {
+          } else if ((newUser || reconcile) && context.at(-1)?.role === 'user'
+            && !context.at(-1)!.text.startsWith('DSH Superagent coordination for this existing conversation.')) {
             const itemId = context.at(-1)?.id ?? recent.newestItemId ?? candidate.id
             assessment = { version: ASSESSMENT_VERSION, at: seenAt, itemId, decision: { needsAttention: false,
               kind: 'none', stage: held ? 'unknown' : 'progress', summary: held ? '按用户要求暂停，等待明确恢复' : '最近记录为用户消息，等待后续进展',

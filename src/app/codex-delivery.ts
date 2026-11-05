@@ -1,6 +1,6 @@
 /** In-process execution of DSH-authored Codex follow-ups through the Desktop owner. */
 import { CodexDesktopIpc, CodexDesktopIpcError, type CodexDesktopState } from '../codex/desktop-ipc.ts'
-import type { CodexControl, CodexControlIntent } from './codex-control.ts'
+import { isCodexVerification, type CodexControl, type CodexControlIntent } from './codex-control.ts'
 import type { CodexMonitor } from './codex-monitor.ts'
 
 type Client = Pick<CodexDesktopIpc, 'readState' | 'startText' | 'interruptTurn' | 'close'>
@@ -64,8 +64,14 @@ export class CodexDelivery {
       // Cycle through held conversations so an unavailable owner cannot block later work.
       for (const intent of queued.filter(item => !this.checked.has(item.id)).slice(0, 8)) {
         this.checked.add(intent.id)
+        const verification = isCodexVerification(intent)
+        if (intent.operation === 'verify' && !verification) { this.failQueued(intent, 'invalid-verification'); return }
         const head = this.host.monitor.routeHead(intent.threadId)
-        if (!head?.present || head.archived || !head.ready || head.needsYou || head.lastItemId !== intent.basedOnItemId) {
+        if (verification && (!intent.verificationRequestId || head?.verificationRequestId !== intent.verificationRequestId)) {
+          this.failQueued(intent, 'verification-request-changed'); return
+        }
+        if (!head?.present || head.archived || !head.ready || head.pausedByUser
+          || head.needsYou && !verification || head.lastItemId !== intent.basedOnItemId) {
           this.failQueued(intent, head?.needsYou ? 'person-required' : 'stale-history-head'); return
         }
         let state: CodexDesktopState | undefined
@@ -90,7 +96,13 @@ export class CodexDelivery {
         if (!this.host.control.view().enabled || this.signal.aborted || this.host.paused()) return
         const claimed = this.host.control.claim(intent.id)
         try {
-          const canSend = () => !this.signal.aborted && !this.host.paused() && this.host.control.view().enabled
+          const canSend = () => {
+            const current = this.host.monitor.routeHead(intent.threadId)
+            return !this.signal.aborted && !this.host.paused() && this.host.control.view().enabled
+              && !!current?.present && !current.archived && current.ready && !current.pausedByUser
+              && (!verification || current.verificationRequestId === intent.verificationRequestId)
+              && (!current.needsYou || verification) && current.lastItemId === intent.basedOnItemId
+          }
           const result = interrupt ? await client.interruptTurn(state, this.signal, canSend)
             : await client.startText(state, claimed.text, claimed.deliveryId!, this.signal, canSend)
           this.host.control.finish(claimed.id, 'sent', { turnId: result.turnId })

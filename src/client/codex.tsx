@@ -133,7 +133,7 @@ export function CodexPage() {
         <li className="dt-row" key={intent.id}><div className="dt-row-main">
           <strong>{intent.threadId}</strong>
           <p className="dt-row-quote dt-clamp">{intent.reason}</p>
-          <div className="dt-row-meta"><span>{intent.operation === 'interrupt'
+          <div className="dt-row-meta"><span>{intent.operation === 'verify' ? (chinese ? '核实请求' : 'Verify request') : intent.operation === 'interrupt'
             ? (chinese ? '中断' : 'Interrupt') : (chinese ? '后续消息' : 'Follow-up')}</span>
             <span>{intent.status}</span><span>{timeText(intent.updatedAt, chinese)}</span></div>
         </div></li>)}</ul>}

@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { afterEach, expect, it } from 'vitest'
-import { CodexControl } from '../src/app/codex-control.ts'
+import { CodexControl, CODEX_VERIFY_MESSAGE } from '../src/app/codex-control.ts'
 import { Store } from '../src/app/store.ts'
 import type { Ticket, Trigger } from '../src/core/index.ts'
 
@@ -134,5 +134,82 @@ it('defaults legacy authorization to zero and persists revocation across a contr
     expect(() => restarted.enqueue(prepared)).toThrow('authorization changed')
     expect(restarted.view().intents).toEqual([])
     expect(restarted.enqueue({ ...prepared, token: restarted.view().token }).status).toBe('queued')
+  } finally { store.close() }
+})
+
+it('accepts verify only with fixed message and 32-hex verificationRequestId', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'codex-verify-'))
+  directories.push(directory)
+  const store = new Store(join(directory, 'orchestrator.sqlite'))
+  try {
+    const control = new CodexControl({ store, stateDir: directory })
+    control.setEnabled(true)
+    const requestId = 'a'.repeat(32)
+    const verify = control.enqueue({ threadId: 'thread-one', basedOnItemId: 'item-one',
+      text: CODEX_VERIFY_MESSAGE, reason: 'DSH verification check', source: 'router', operation: 'verify', verificationRequestId: requestId })
+    expect(verify.operation).toBe('verify')
+    expect(verify.verificationRequestId).toBe(requestId)
+    expect(verify.status).toBe('queued')
+    expect(() => control.enqueue({ threadId: 'thread-two', basedOnItemId: 'item-two',
+      text: 'Custom verification message', reason: 'DSH check', source: 'router', operation: 'verify', verificationRequestId: requestId }))
+      .toThrow('fixed read-only message')
+    expect(() => control.enqueue({ threadId: 'thread-three', basedOnItemId: 'item-three',
+      text: CODEX_VERIFY_MESSAGE, reason: 'DSH check', source: 'router', operation: 'verify', verificationRequestId: 'short' }))
+      .toThrow()
+    expect(() => control.enqueue({ threadId: 'thread-four', basedOnItemId: 'item-four',
+      text: CODEX_VERIFY_MESSAGE, reason: 'DSH check', source: 'router', operation: 'verify' })).toThrow()
+    expect(() => control.enqueue({ threadId: 'thread-five', basedOnItemId: 'item-five',
+      text: 'Regular message', reason: 'DSH check', source: 'router', verificationRequestId: requestId }))
+      .toThrow('Only verification targets')
+  } finally { store.close() }
+})
+
+it('deduplicates verify by same verificationRequestId even after sent', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'codex-verify-dedup-'))
+  directories.push(directory)
+  const store = new Store(join(directory, 'orchestrator.sqlite'))
+  try {
+    let now = new Date('2026-11-03T05:00:00Z')
+    const control = new CodexControl({ store, stateDir: directory, now: () => now })
+    control.setEnabled(true)
+    const requestId = 'b'.repeat(32)
+    const first = control.enqueue({ threadId: 'thread-one', basedOnItemId: 'item-one',
+      text: CODEX_VERIFY_MESSAGE, reason: 'DSH verification', source: 'router', operation: 'verify', verificationRequestId: requestId })
+    const duplicate = control.enqueue({ threadId: 'thread-one', basedOnItemId: 'item-one',
+      text: CODEX_VERIFY_MESSAGE, reason: 'DSH verification retry', source: 'router', operation: 'verify', verificationRequestId: requestId })
+    expect(duplicate.id).toBe(first.id)
+    const claimed = control.claim(first.id)
+    control.finish(claimed.id, 'sent', { turnId: 'turn-a' })
+    now = new Date('2026-11-03T05:01:00Z')
+    const afterSent = control.enqueue({ threadId: 'thread-one', basedOnItemId: 'item-two',
+      text: CODEX_VERIFY_MESSAGE, reason: 'DSH verification after head change', source: 'router', operation: 'verify', verificationRequestId: requestId })
+    expect(afterSent.id).toBe(first.id)
+    const differentRequest = control.enqueue({ threadId: 'thread-one', basedOnItemId: 'item-two',
+      text: CODEX_VERIFY_MESSAGE, reason: 'DSH verification new request', source: 'router', operation: 'verify', verificationRequestId: 'c'.repeat(32) })
+    expect(differentRequest.id).not.toBe(first.id)
+  } finally { store.close() }
+})
+
+it('keeps separate verify intents for different verificationRequestIds with independent receipts', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'codex-verify-multi-'))
+  directories.push(directory)
+  const store = new Store(join(directory, 'orchestrator.sqlite'))
+  try {
+    let now = new Date('2026-11-03T05:00:00Z')
+    const control = new CodexControl({ store, stateDir: directory, now: () => now })
+    control.setEnabled(true)
+    const requestA = 'a'.repeat(32), requestB = 'b'.repeat(32)
+    const intentA = control.enqueue({ threadId: 'thread-one', basedOnItemId: 'head-one',
+      text: CODEX_VERIFY_MESSAGE, reason: 'DSH verify A', source: 'router', operation: 'verify', verificationRequestId: requestA })
+    const claimedA = control.claim(intentA.id)
+    control.finish(claimedA.id, 'sent', { turnId: 'turn-a' })
+    now = new Date('2026-11-03T05:01:00Z')
+    const intentB = control.enqueue({ threadId: 'thread-one', basedOnItemId: 'head-one',
+      text: CODEX_VERIFY_MESSAGE, reason: 'DSH verify B', source: 'router', operation: 'verify', verificationRequestId: requestB })
+    expect(intentB.id).not.toBe(intentA.id)
+    const view = control.view()
+    expect(view.intents).toHaveLength(2)
+    expect(view.intents.find(i => i.id === intentA.id)).toMatchObject({ status: 'sent', verificationRequestId: requestA, turnId: 'turn-a' })
+    expect(view.intents.find(i => i.id === intentB.id)).toMatchObject({ status: 'queued', verificationRequestId: requestB })
   } finally { store.close() }
 })

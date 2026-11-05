@@ -100,6 +100,8 @@ const sensitiveWork = /批准|审批(?!模块|功能|流程|负责人|业务|接
 const businessChoice = /业务|退款|补发|订单|学校|字段|隐私|合规|合同|客户|价格|预算|\b(?:business|refund|order|customer|pricing|budget|contract|privacy|compliance)\b/i
 const missingCredential = /(?:缺少|缺失|尚缺|缺乏|拿不到|无法获取|\bmissing\b|\black\w*\b|\bwithout\b).{0,60}(?:密码|口令|验证码|密钥|凭据|令牌|\b(?:password|passcode|otp|api[ _-]?key|token|credentials?)\b)/i
 const nativePermissionWork = /(?:原生|系统|隐私(?:与|和)?安全|macOS)[^。！？\n]{0,40}(?:弹窗|允许|授予|启用|点击|点按)|\b(?:native|system|macOS)\b[^.!?\n]{0,40}\b(?:prompt|dialog|allow|grant|click)\b/i
+const existingCapabilityCheck = /(?:确认|核实|检查|查询)[^。！？\n]{0,24}(?:组织|当前账号|现有账号|本账号)[^。！？\n]{0,24}(?:是否已开通|是否(?:已)?有|是否具备|能否访问|有无)[^。！？\n]{0,24}(?:功能|权限|访问)/
+const provisionAccess = /(?:没有|未开通|无权限).{0,12}(?:就|则).{0,12}(?:开通|启用|授予|授权)|(?:请(?:你|您)?|帮我|直接|自动|申请)\s*(?:帮我|为当前账号|为现有账号)?\s*(?:开通|授予|授权)/
 
 function requestedWork(text: string): string {
   // A restriction on delivery does not prohibit an otherwise authorized read-only check.
@@ -125,14 +127,15 @@ function decisionCandidates(visible: string): RequestCandidate[] {
       && (/[?？]/.test(clause[0]) || /^(?:\s*[-*]\s*)?\s*(?:要不要|是否|能否|可否|先|你|您|由你|由您|我可以继续|should\b|shall\b|may\b|can\b|could\b|do you\b|would you\b)/i.test(work))
     const missing = missingCredential.test(work)
       && !/(?:我会|正在|可以).{0,16}(?:读取|查找|获取)|\b(?:can|will)\s+(?:read|retrieve|find)\b/i.test(work)
-    if (!asks && !missing) continue
+    const provision = provisionAccess.test(work)
+    if (!asks && !missing && !provision) continue
     const localAt = direct?.index ?? work.search(/\S/)
     const at = clause.index + Math.max(0, localAt)
-    const protectedWork = sensitiveWork.test(work) || businessChoice.test(work) || nativePermissionWork.test(work) || missing
+    const protectedWork = sensitiveWork.test(work) || businessChoice.test(work) || nativePermissionWork.test(work) || missing || provision
     const routineQuestion = !direct || /选择|决定|确认|答复|回答|告诉|补充|\b(?:confirm|decide|choose|answer)\b/i.test(direct[0])
     candidates.push({ at, end: clause.index + clause[0].trimEnd().length,
-      kind: direct ? decisionKind(direct[0]) : decisionKind(work),
-      routine: asks && routineQuestion && !protectedWork && (routineWork.test(work)
+      kind: provision ? 'approval' : direct ? decisionKind(direct[0]) : decisionKind(work),
+      routine: asks && routineQuestion && !protectedWork && (routineWork.test(work) || existingCapabilityCheck.test(work)
         || /(?:要不要|是否)继续|\b(?:should|shall)\s+i\s+(?:continue|proceed)\b/i.test(work)) })
   }
   return candidates
@@ -242,6 +245,7 @@ export function buildCodexTriagePrompt(input: CodexTriageInput): string {
     '“先等 CI 还是推进”“要不要继续检查”“请你选择或确认先等 CI 还是查日志”属于 needsAgent，不新增权限，也不表示用户 hold。',
     'needsYou 必须是有待执行动作的当前真人请求；已完成或已确认事实、否定请求、不需要用户、代码或日志字段、业务模块及引述均不是请求。',
     '新增授权或权限、缺少不可替代凭据、密码、验证码、手动解锁等物理操作、支付删除及必要业务选择仍归 needsYou；即使带“要不要”也不得改成 needsAgent。',
+    '核查组织是否已开通功能、当前账号是否已有权限属于 needsAgent，只能用现有访问核查，不得授予新权限。',
     '最新 user 明确“停止直到我说继续”时，归 unknown、kind=none、needsAttention=false，summary 说明用户已暂停，action 为保持暂停，不再追问是否继续。',
     '禁止 commit/push 只限制这些动作，不妨碍原授权内的只读检查；不得据此授权被禁止的动作。',
     'fenced code、inline code、引用日志、ASCII quoted 字段及其内容只提供背景，不是当前请求。',

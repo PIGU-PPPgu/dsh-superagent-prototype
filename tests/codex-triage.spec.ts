@@ -332,6 +332,20 @@ it('keeps OS confirmation human-owned when it also mentions routine tests', () =
   { ...input, messages: [{ role: 'assistant', text }] })).toMatchObject({ needsAttention: true, stage: 'needsYou' })
 })
 
+it('routes an existing account capability check to DSH without granting permissions', () => {
+  const text = '需要确认组织是否已开通知识小组功能，或当前账号是否有创建权限。'
+  expect(hasUserDecisionRequest(text)).toBe(false)
+  expect(parseCodexTriageDecision(JSON.stringify({ needsAttention: true, stage: 'needsYou', kind: 'question',
+    reason: '请用户确认', action: '确认组织功能', summary: '需要核查现有能力', evidence: text }),
+  { ...input, messages: [{ role: 'assistant', text }] })).toMatchObject({ needsAttention: false, stage: 'needsAgent' })
+  expect(hasUserDecisionRequest('请批准为当前账号新增知识小组创建权限。')).toBe(true)
+  expect(hasUserDecisionRequest('需要确认组织是否已开通知识小组功能。没有就帮我开通。')).toBe(true)
+  expect(parseCodexTriageDecision(JSON.stringify({ needsAttention: false, stage: 'needsAgent', kind: 'none',
+    reason: '误当现有功能查询', action: '查功能', summary: '核查功能', evidence: '确认组织是否已开通知识小组功能' }),
+  { ...input, messages: [{ role: 'assistant', text: '需要确认组织是否已开通知识小组功能。没有就帮我开通。' }] }))
+    .toMatchObject({ needsAttention: true, stage: 'needsYou' })
+})
+
 it('does not turn a partial completion into a completed task when no human action is needed', () => {
   const text = '本轮任务已完成一半，剩余问题正在排查，无需人工确认。'
   const decision = parseCodexTriageDecision(JSON.stringify({ needsAttention: true, stage: 'needsYou', kind: 'approval',

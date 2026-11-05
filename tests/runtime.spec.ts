@@ -1,4 +1,6 @@
 import { seedCodexCandidate } from './fixtures/codex.ts'
+import { randomUUID } from 'node:crypto'
+
 import { Context } from '@deepseek-ai/cordis'
 import { bindScopeParent } from '@deepseek-ai/dsh-scope'
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -2069,4 +2071,88 @@ it('keeps the Policy the main Session judges by in its prompt, after admission a
   await runtime.settings.save('policy', { ...saved.policy, rules: rules.map(rule => ({ ...rule, enabled: false })) }, runtime.store.blockRevision('policy'), 'panel')
   expect(policy()).toContain('No rule is enabled: a proactive candidate can only be ignored.')
   expect(policy()).toContain('The accept mode and the rules decide proactive candidates only')
+})
+
+it('lets DSH verify an old human request with matching verificationRequestId and refuses without it', async () => {
+  const requestId = 'a'.repeat(32)
+  runtime.store.set('codex-monitor-v1', { version: 1, enabled: true, initialized: true, threads: {
+    'thread-verify': { id: 'thread-verify', sourceKind: 'vscode', archived: false, present: true,
+      baselined: true, lastItemId: 'item-needs', seenAt: '2026-11-03T05:00:00Z', context: [] },
+  } })
+  const monitor = (runtime as unknown as { codexMonitor: CodexMonitor }).codexMonitor
+  vi.spyOn(monitor, 'routeHead').mockReturnValue({ threadId: 'thread-verify', title: 'Task', present: true,
+    archived: false, ready: true, needsYou: true, verificationRequestId: requestId, lastItemId: 'item-needs' })
+  vi.spyOn(monitor, 'readHistory').mockResolvedValue({ threadId: 'thread-verify', title: 'Task', source: 'persisted Codex history',
+    readAt: '2026-11-03T05:00:00Z', complete: false, headItemId: 'item-needs', messages: [] })
+  runtime.codexControl.setEnabled(true)
+  runtime.codexControl.setBridgeAvailable(true)
+  const tool = tools.get(runtime.masterId)?.get('orchestrator_codex_route')
+  if (!tool) throw new Error('orchestrator_codex_route not found')
+  const result = await tool.execute({ operation: 'verify', thread_id: 'thread-verify',
+    base_item_id: 'item-needs', reason: 'Verify old request' }, { signal: new AbortController().signal }) as { intent: any; bridgeReady: boolean }
+  await runtime.idle()
+  expect(result.intent).toMatchObject({ operation: 'verify', verificationRequestId: requestId, status: 'queued' })
+  expect(result.intent.expectedTurnId).toBeUndefined()
+  expect(runtime.codexControl.view().intents).toHaveLength(1)
+
+  vi.mocked(monitor.routeHead).mockReturnValue({ threadId: 'thread-verify', title: 'Task', present: true,
+    archived: false, ready: true, needsYou: true, lastItemId: 'item-needs' })
+  await expect(runTool(runtime.masterId, 'orchestrator_codex_route', { operation: 'verify',
+    thread_id: 'thread-verify', base_item_id: 'item-needs', reason: 'Verify without ID' }))
+    .rejects.toThrow('unverified old human request')
+})
+
+it('refuses verify with custom message, active_turn_id, or when control/history is stale', async () => {
+  const requestId = 'b'.repeat(32)
+  runtime.store.set('codex-monitor-v1', { version: 1, enabled: true, initialized: true, threads: {
+    'thread-verify': { id: 'thread-verify', sourceKind: 'vscode', archived: false, present: true,
+      baselined: true, lastItemId: 'item-needs', seenAt: '2026-11-03T05:00:00Z', context: [] },
+  } })
+  const monitor = (runtime as unknown as { codexMonitor: CodexMonitor }).codexMonitor
+  vi.spyOn(monitor, 'routeHead').mockReturnValue({ threadId: 'thread-verify', title: 'Task', present: true,
+    archived: false, ready: true, needsYou: true, verificationRequestId: requestId, lastItemId: 'item-needs' })
+  vi.spyOn(monitor, 'readHistory').mockResolvedValue({ threadId: 'thread-verify', title: 'Task', source: 'persisted Codex history',
+    readAt: '2026-11-03T05:00:00Z', complete: false, headItemId: 'item-needs', messages: [] })
+  runtime.codexControl.setEnabled(true)
+  runtime.codexControl.setBridgeAvailable(true)
+
+  await expect(runTool(runtime.masterId, 'orchestrator_codex_route', { operation: 'verify',
+    thread_id: 'thread-verify', base_item_id: 'item-needs', reason: 'Verify', message: 'Custom text' }))
+    .rejects.toThrow('omit message')
+
+  await expect(runTool(runtime.masterId, 'orchestrator_codex_route', { operation: 'verify',
+    thread_id: 'thread-verify', base_item_id: 'item-needs', reason: 'Verify', active_turn_id: randomUUID() }))
+    .rejects.toThrow('omit message')
+
+  runtime.codexControl.setEnabled(false)
+  await expect(runTool(runtime.masterId, 'orchestrator_codex_route', { operation: 'verify',
+    thread_id: 'thread-verify', base_item_id: 'item-needs', reason: 'Verify' }))
+    .rejects.toThrow('not enabled')
+  runtime.codexControl.setEnabled(true)
+
+  await expect(runTool(runtime.masterId, 'orchestrator_codex_route', { operation: 'verify',
+    thread_id: 'thread-verify', base_item_id: 'item-old', reason: 'Verify' }))
+    .rejects.toThrow('changed')
+})
+
+it('refuses verify when an active Ticket owns the conversation', async () => {
+  const requestId = 'c'.repeat(32)
+  const candidate = { threadId: 'thread-owned', itemId: 'assistant-owned', title: 'Task',
+    summary: 'Task', evidence: 'Task', repository: 'acme/widgets',
+    messages: [{ role: 'assistant' as const, text: 'Task output' }] }
+  const ticketId = await acceptCodexCandidate(candidate)
+  expect(runtime.store.tickets.get(ticketId)?.ended).toBeUndefined()
+  runtime.store.set('codex-monitor-v1', { version: 1, enabled: true, initialized: true, threads: {
+    [candidate.threadId]: { id: candidate.threadId, name: candidate.title, sourceKind: 'vscode', archived: false,
+      present: true, baselined: true, lastItemId: candidate.itemId, seenAt: '2026-11-03T05:00:00Z', context: [] },
+  } })
+  const monitor = (runtime as unknown as { codexMonitor: CodexMonitor }).codexMonitor
+  vi.spyOn(monitor, 'routeHead').mockReturnValue({ threadId: candidate.threadId, title: 'Task', present: true,
+    archived: false, ready: true, needsYou: true, verificationRequestId: requestId, lastItemId: candidate.itemId })
+  runtime.codexControl.setEnabled(true)
+  runtime.codexControl.setBridgeAvailable(true)
+  await expect(runTool(runtime.masterId, 'orchestrator_codex_route', { operation: 'verify',
+    thread_id: candidate.threadId, base_item_id: candidate.itemId, reason: 'Verify owned thread' }))
+    .rejects.toThrow('active DSH Ticket')
+  expect(runtime.codexControl.view().intents).toEqual([])
 })
