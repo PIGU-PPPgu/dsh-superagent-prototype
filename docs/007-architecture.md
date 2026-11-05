@@ -324,6 +324,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/codex/discovery.ts` | Bounded local-only discovery of stored Codex thread IDs for the operator's allowlist |
 | `src/codex/monitor-read.ts` | Read-only pagination of all locally indexed Codex threads and bounded new user/agent messages |
 | `src/codex/local-inventory.ts` | Read-only rollout file discovery joined with the local Codex state index |
+| `src/codex/project-context.ts` | Bounded original requests, recent messages, project documents and local Git facts for context-bound delegation |
 | `src/codex/triage.ts` | Bounded model input and strict attention decision parsing for changed Codex messages |
 | `src/codex/local.ts` | Loopback-only dashboard server and private local allowlist editor |
 | `src/codex/local-ui.ts` | Self-contained local dashboard HTML, CSS and browser code |
@@ -434,6 +435,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/codex-local.spec.ts` | Mac-local loopback dashboard, discovery, private file and allowlist boundaries |
 | `tests/codex-monitor-read.spec.ts` | All-source and archived discovery, bounded incremental Codex message reads |
 | `tests/codex-local-inventory.spec.ts` | Filesystem and SQLite inventory, source normalization and path boundaries |
+| `tests/codex-project-context.spec.ts` | Original request coverage, bounded project facts, safe file reads and history freshness |
+| `tests/codex-context.spec.ts` | Conversation-bound context receipts, user evidence, expiry and project changes |
 | `tests/codex-triage.spec.ts` | Bounded untrusted model input and strict attention output |
 | `tests/codex-monitor.spec.ts` | Baseline, changed-message triage, acknowledgement, restart, failed-read retry and opt-in failure handoff |
 | `tests/codex-router.spec.ts` | Global digest persistence and meaningful-change routing |

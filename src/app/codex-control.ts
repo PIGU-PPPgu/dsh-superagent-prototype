@@ -33,6 +33,8 @@ export interface CodexControlIntent {
   operation?: 'interrupt' | 'verify'
   expectedTurnId?: string
   verificationRequestId?: string
+  projectContextId?: string
+  delegation?: { goal: string; action: string; doneWhen: string; userItemId: string; project?: string }
 }
 export const isCodexVerification = (intent: Pick<CodexControlIntent, 'operation' | 'text'>): boolean =>
   intent.operation === 'verify' && intent.text === CODEX_VERIFY_MESSAGE
@@ -178,7 +180,8 @@ export class CodexControl {
     })
   }
   enqueue(input: { threadId: string; basedOnItemId: string; text: string; reason: string; priority?: number;
-    source: 'router' | 'panel'; operation?: 'interrupt' | 'verify'; expectedTurnId?: string; verificationRequestId?: string; token?: number }): CodexControlIntent {
+    source: 'router' | 'panel'; operation?: 'interrupt' | 'verify'; expectedTurnId?: string; verificationRequestId?: string;
+    projectContextId?: string; delegation?: CodexControlIntent['delegation']; token?: number }): CodexControlIntent {
     const token = input.token ?? this.state().token ?? 0
     const threadId = CodexIdSchema.parse(input.threadId)
     const basedOnItemId = CodexIdSchema.parse(input.basedOnItemId)
@@ -187,6 +190,14 @@ export class CodexControl {
     const priority = z.number().int().min(0).max(3).parse(input.priority ?? 1)
     const expectedTurnId = input.operation === 'interrupt' ? z.uuid().parse(input.expectedTurnId) : undefined
     const verificationRequestId = input.operation === 'verify' ? z.string().regex(/^[a-f0-9]{32}$/).parse(input.verificationRequestId) : undefined
+    const projectContextId = input.projectContextId === undefined ? undefined : z.string().regex(/^[a-f0-9]{32}$/).parse(input.projectContextId)
+    const delegation = input.delegation === undefined ? undefined : z.object({ goal: z.string().trim().min(1).max(140),
+      action: z.string().trim().min(1).max(500), doneWhen: z.string().trim().min(1).max(160),
+      userItemId: CodexIdSchema, project: z.string().max(200).optional() }).strict().parse(input.delegation)
+    if (input.operation === 'verify' && (projectContextId || delegation) || input.operation === 'interrupt' && delegation
+      || !input.operation && !!projectContextId !== !!delegation) {
+      throw new Error('Project context and delegation belong together on a follow-up')
+    }
     if (input.operation !== 'interrupt' && input.expectedTurnId) throw new Error('Only an interrupt targets an active turn')
     if (input.operation !== 'verify' && input.verificationRequestId) throw new Error('Only verification targets an old human request')
     if (input.operation === 'verify' && text !== CODEX_VERIFY_MESSAGE) throw new Error('Codex verification requires the fixed read-only message')
@@ -217,6 +228,8 @@ export class CodexControl {
           priority, status: 'queued', source: input.source, createdAt: at, updatedAt: at,
           ...(input.operation ? { operation: input.operation, expectedTurnId } : {}),
           ...(verificationRequestId ? { verificationRequestId } : {}) }
+        if (projectContextId) intent.projectContextId = projectContextId
+        if (delegation) intent.delegation = delegation
         this.save({ ...state, intents: { ...state.intents, [id]: intent } })
         return intent
       })

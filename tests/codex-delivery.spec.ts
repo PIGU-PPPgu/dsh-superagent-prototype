@@ -7,6 +7,7 @@ import type { CodexRouteHead } from '../src/app/codex-monitor.ts'
 import { CodexDelivery } from '../src/app/codex-delivery.ts'
 import { Store } from '../src/app/store.ts'
 import { CodexDesktopIpcError, type CodexDesktopState } from '../src/codex/desktop-ipc.ts'
+import { testCodexRoutingContext } from './fixtures/codex.ts'
 
 const cleanups: (() => Promise<void>)[] = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup() })
@@ -25,7 +26,9 @@ function fixture() {
   const monitor = { routeHead: vi.fn((): CodexRouteHead => ({ threadId: 'thread-a', title: 'Task', present: true,
     archived: false, ready: true, needsYou: false, lastItemId: 'head-a' })),
     readHistory: vi.fn(async () => ({ threadId: 'thread-a', title: 'Task', source: 'persisted Codex history' as const,
-      readAt: '', complete: false, headItemId: 'head-a', messages: [] })) }
+      readAt: '', complete: false, headItemId: 'head-a', messages: [] })),
+    requireProjectContext: vi.fn(async () => testCodexRoutingContext('thread-a', 'head-a')),
+    isProjectContextCurrent: vi.fn(() => true) }
   const relay = vi.fn(), connect = vi.fn(async () => client)
   const delivery = new CodexDelivery({ control, monitor, signal: lifetime.signal, paused: () => paused, relay, connect })
   const enqueue = () => control.enqueue({ threadId: 'thread-a', basedOnItemId: 'head-a', text: 'Continue authorized work',
@@ -47,6 +50,39 @@ it('probes while disabled and sends a DSH-authored intent once when enabled', as
   await test.delivery.request()
   expect(test.client.startText).toHaveBeenCalledOnce()
   expect(JSON.parse(test.relay.mock.calls[0]![1])).toMatchObject({ kind: 'codex_delivery', status: 'sent', settingsVerified: true })
+})
+
+it.each([false, true])('rechecks project context before sending a planned follow-up; stale=%s', async stale => {
+  const test = fixture(); test.control.setEnabled(true)
+  const context = testCodexRoutingContext('thread-a', 'head-a')
+  test.control.enqueue({ threadId: 'thread-a', basedOnItemId: 'head-a', text: 'Perform the authorized verification',
+    reason: 'Verify build', source: 'router', projectContextId: context.contextId,
+    delegation: { goal: 'Complete verification', action: 'Run tests', doneWhen: 'Tests pass', userItemId: 'user-goal' } })
+  if (stale) test.monitor.requireProjectContext.mockRejectedValueOnce(new Error('Project context changed'))
+  await test.delivery.request()
+  expect(test.monitor.requireProjectContext).toHaveBeenCalledWith(context.contextId, 'thread-a', 'head-a', expect.any(AbortSignal))
+  expect(test.control.view().intents[0]).toMatchObject(stale
+    ? { status: 'failed', error: 'project-context-changed' } : { status: 'sent' })
+  expect(test.client.startText).toHaveBeenCalledTimes(stale ? 0 : 1)
+})
+
+it('revokes a validated context during final Desktop send preparation', async () => {
+  const test = fixture(); test.control.setEnabled(true)
+  const context = testCodexRoutingContext('thread-a', 'head-a')
+  test.control.enqueue({ threadId: 'thread-a', basedOnItemId: 'head-a', text: 'Perform authorized verification',
+    reason: 'Verify', source: 'router', projectContextId: context.contextId,
+    delegation: { goal: 'Verify', action: 'Run tests', doneWhen: 'Tests pass', userItemId: 'user-goal' } })
+  let reachedWire = false
+  test.client.startText.mockImplementation(async (_state, _text, _id, _signal, canSend) => {
+    test.monitor.isProjectContextCurrent.mockReturnValue(false)
+    if (!canSend!()) throw new CodexDesktopIpcError('delivery-held')
+    reachedWire = true
+    throw new Error('must not send')
+  })
+  await test.delivery.request()
+  expect(reachedWire).toBe(false)
+  expect(test.control.view().intents[0]).toMatchObject({ status: 'queued' })
+  expect(test.control.view().intents[0]).not.toHaveProperty('deliveryId')
 })
 
 it('interrupts only the exact active turn and never sends text as an interruption', async () => {

@@ -3,6 +3,7 @@ import { z } from 'zod'
 
 export interface MonitoredCodexThread {
   id: string
+  cwd?: string
   name?: string
   updatedAt?: string
   archived: boolean
@@ -35,6 +36,7 @@ const ListPage = z.looseObject({
 })
 const ListedThread = z.looseObject({
   id: z.string().min(1),
+  cwd: z.string().nullish().optional(),
   name: z.string().nullish().optional(),
   updatedAt: z.number().finite().nonnegative().nullish().optional(),
   source: z.unknown(),
@@ -96,6 +98,7 @@ function threadProjection(value: unknown, archived: boolean): MonitoredCodexThre
     ? undefined : new Date(thread.updatedAt * 1000).toISOString()
   return {
     id: thread.id,
+    ...(thread.cwd ? { cwd: thread.cwd } : {}),
     ...(thread.name ? { name: thread.name } : {}),
     ...(updatedAt ? { updatedAt } : {}),
     archived,

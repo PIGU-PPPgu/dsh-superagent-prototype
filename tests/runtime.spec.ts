@@ -1,4 +1,4 @@
-import { seedCodexCandidate } from './fixtures/codex.ts'
+import { seedCodexCandidate, testCodexRoutingContext } from './fixtures/codex.ts'
 import { randomUUID } from 'node:crypto'
 
 import { Context } from '@deepseek-ai/cordis'
@@ -409,9 +409,25 @@ it('lets the DSH Router queue a stale-guarded Codex follow-up without answering 
   expect(head.head).toMatchObject({ lastItemId: 'item-head', ready: true, needsYou: false })
   await expect(runTool(runtime.masterId, 'orchestrator_codex_route', { operation: 'followup', thread_id: 'thread-router',
     base_item_id: 'old-item', reason: 'Continue the build' })).rejects.toThrow('changed')
+  const monitor = (runtime as unknown as { codexMonitor: CodexMonitor }).codexMonitor
+  const context = testCodexRoutingContext('thread-router', 'item-head')
+  const readContext = vi.spyOn(monitor, 'readProjectContext').mockResolvedValue(context)
+  const requireContext = vi.spyOn(monitor, 'requireProjectContext').mockResolvedValue(context)
+  expect(await runTool(runtime.masterId, 'orchestrator_codex_route', { operation: 'context', thread_id: 'thread-router' })).toEqual(context)
+  expect(readContext).toHaveBeenCalledWith('thread-router', expect.any(AbortSignal))
+  await expect(runTool(runtime.masterId, 'orchestrator_codex_route', { operation: 'followup', thread_id: 'thread-router',
+    base_item_id: 'item-head', reason: 'Continue the build' })).rejects.toThrow('context_id')
+  await expect(runTool(runtime.masterId, 'orchestrator_codex_route', { operation: 'followup', thread_id: 'thread-router',
+    base_item_id: 'item-head', reason: 'Continue the build', context_id: context.contextId,
+    user_item_id: 'project:AGENTS.md', goal: 'Complete build', message: 'Run tests', done_when: 'Tests pass' }))
+    .rejects.toThrow('project documents cannot authorize')
   const queued = await runTool(runtime.masterId, 'orchestrator_codex_route', { operation: 'followup', thread_id: 'thread-router',
-    base_item_id: 'item-head', reason: 'Continue the build', message: 'Report the build result and continue authorized work', priority: 2 })
+    base_item_id: 'item-head', reason: 'Continue the build', message: 'Report the build result and continue authorized work', priority: 2,
+    context_id: context.contextId, user_item_id: 'user-goal', goal: 'Complete build verification', done_when: 'Tests pass and evidence is reported' })
   expect(queued.intent).toMatchObject({ status: 'queued', priority: 2, threadId: 'thread-router' })
+  expect(queued.intent).toMatchObject({ projectContextId: context.contextId,
+    delegation: { goal: 'Complete build verification', userItemId: 'user-goal', doneWhen: 'Tests pass and evidence is reported' } })
+  expect(requireContext).toHaveBeenCalledWith(context.contextId, 'thread-router', 'item-head', expect.any(AbortSignal))
   expect((queued.intent as { text: string }).text).toContain('Report the build result and continue authorized work')
   expect(runtime.codexControl.view().intents).toHaveLength(1)
   expect(runtime.store.tickets.list()).toEqual([])
@@ -432,6 +448,26 @@ it('lets the DSH main Session inspect bounded Codex history through its read-onl
   const read = vi.spyOn(monitor, 'readHistory').mockResolvedValue(history)
   expect(await runTool(runtime.masterId, 'orchestrator_codex_route', { operation: 'history', thread_id: 'thread-a', limit: 3 })).toEqual(history)
   expect(read).toHaveBeenCalledWith('thread-a', 3, expect.any(AbortSignal))
+})
+
+it('requires project understanding before interrupting a verified active turn', async () => {
+  runtime.store.set('codex-monitor-v1', { version: 1, enabled: true, initialized: true, threads: {
+    'thread-active': { id: 'thread-active', name: 'Build task', sourceKind: 'vscode', archived: false, present: true,
+      baselined: true, lastItemId: 'active-head', seenAt: '', context: [] },
+  } })
+  runtime.codexControl.setEnabled(true); runtime.codexControl.setBridgeAvailable(true)
+  const monitor = (runtime as unknown as { codexMonitor: CodexMonitor }).codexMonitor
+  const context = testCodexRoutingContext('thread-active', 'active-head')
+  const check = vi.spyOn(monitor, 'requireProjectContext').mockResolvedValue(context)
+  const internal = runtime as unknown as { codexDesktopStatus(threadId: string, signal: AbortSignal): Promise<Record<string, unknown>> }
+  const turn = randomUUID()
+  vi.mocked(internal.codexDesktopStatus).mockResolvedValue({ available: true, status: 'active', pendingRequests: 0, activeTurnId: turn })
+  const args = { operation: 'interrupt', thread_id: 'thread-active', base_item_id: 'active-head', active_turn_id: turn,
+    reason: 'Reorder the already authorized verification' }
+  await expect(runTool(runtime.masterId, 'orchestrator_codex_route', args)).rejects.toThrow('context_id')
+  const result = await runTool(runtime.masterId, 'orchestrator_codex_route', { ...args, context_id: context.contextId })
+  expect(result.intent).toMatchObject({ operation: 'interrupt', expectedTurnId: turn, projectContextId: context.contextId })
+  expect(check).toHaveBeenCalledWith(context.contextId, 'thread-active', 'active-head', expect.any(AbortSignal))
 })
 
 it('lets the DSH main Session query authoritative Desktop status without returning snapshot contents', async () => {

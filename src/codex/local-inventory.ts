@@ -24,6 +24,7 @@ interface RolloutFile {
 }
 
 interface ThreadRow {
+  cwd?: string
   name?: string
   source?: string
   updatedAt?: number
@@ -125,13 +126,13 @@ function tableColumns(db: DatabaseSync): Set<string> {
 }
 
 /** Reads thread metadata for the given IDs. A missing or damaged schema fails loudly. */
-function readThreadRows(db: DatabaseSync, ids: string[], hasParent: boolean, hasOrigin: boolean): Map<string, ThreadRow> {
+function readThreadRows(db: DatabaseSync, ids: string[], hasParent: boolean, hasOrigin: boolean, hasCwd: boolean): Map<string, ThreadRow> {
   const rows = new Map<string, ThreadRow>()
   for (let index = 0; index < ids.length; index += QUERY_CHUNK) {
     const chunk = ids.slice(index, index + QUERY_CHUNK)
     const placeholders = chunk.map(() => '?').join(',')
     const sql = `select id, name, title, source, updated_at${hasParent ? ', attached_thread_parent_id' : ''}
-      ${hasOrigin ? ', git_origin_url' : ''}
+      ${hasOrigin ? ', git_origin_url' : ''}${hasCwd ? ', cwd' : ''}
       from threads where id in (${placeholders})`
     for (const row of db.prepare(sql).all(...chunk) as Record<string, unknown>[]) {
       const id = typeof row.id === 'string' ? row.id : undefined
@@ -139,6 +140,7 @@ function readThreadRows(db: DatabaseSync, ids: string[], hasParent: boolean, has
       const name = [row.name, row.title].find(value => typeof value === 'string' && value.trim().length > 0)
       const parent = typeof row.attached_thread_parent_id === 'string' ? row.attached_thread_parent_id : undefined
       rows.set(id, {
+        ...(typeof row.cwd === 'string' && row.cwd.trim().length > 0 ? { cwd: row.cwd.trim() } : {}),
         ...(typeof name === 'string' ? { name: name.trim().slice(0, MAX_NAME) } : {}),
         ...(typeof row.source === 'string' ? { source: row.source } : {}),
         ...(typeof row.updated_at === 'number' && Number.isFinite(row.updated_at) && row.updated_at > 0
@@ -167,12 +169,12 @@ function openStateDatabase(path: string, ids: string[]): Map<string, ThreadRow> 
     for (const required of ['id', 'source', 'updated_at']) {
       if (!columns.has(required)) throw new Error(`Codex state database is missing the threads.${required} column`)
     }
-    return readThreadRows(db, ids, columns.has('attached_thread_parent_id'), columns.has('git_origin_url'))
+    return readThreadRows(db, ids, columns.has('attached_thread_parent_id'), columns.has('git_origin_url'), columns.has('cwd'))
   } finally { db.close() }
 }
 
 /** Reads only a bounded first metadata record for files absent from the state index. */
-async function readSessionMeta(file: RolloutFile, signal: AbortSignal): Promise<{ id: string; source?: string } | undefined> {
+async function readSessionMeta(file: RolloutFile, signal: AbortSignal): Promise<{ id: string; source?: string; cwd?: string } | undefined> {
   const input = createReadStream(file.path)
   const stream = file.path.endsWith('.zst') ? input.pipe(createZstdDecompress()) : input
   const chunks: Buffer[] = []
@@ -192,8 +194,9 @@ async function readSessionMeta(file: RolloutFile, signal: AbortSignal): Promise<
     if (record.type !== 'session_meta' || !record.payload || typeof record.payload !== 'object') return undefined
     const payload = record.payload as Record<string, unknown>
     if (typeof payload.id !== 'string') return undefined
+    const cwd = typeof payload.cwd === 'string' && payload.cwd.trim().length > 0 ? payload.cwd.trim() : undefined
     const source = payload.source
-    return { id: payload.id.toLowerCase(), ...(typeof source === 'string' ? { source }
+    return { id: payload.id.toLowerCase(), ...(cwd ? { cwd } : {}), ...(typeof source === 'string' ? { source }
       : source && typeof source === 'object' ? { source: JSON.stringify(source) } : {}) }
   } catch {
     checkCancelled(signal)
@@ -233,7 +236,7 @@ export async function listLocalCodexInventory(codexHome: string, signal: AbortSi
   }
 
   const verified: RolloutFile[] = []
-  const fallback = new Map<string, { id: string; source?: string }>()
+  const fallback = new Map<string, { source?: string; cwd?: string }>()
   for (const file of merged.values()) {
     checkCancelled(signal)
     if (metadata.has(file.id)) { verified.push(file); continue }
@@ -241,7 +244,7 @@ export async function listLocalCodexInventory(codexHome: string, signal: AbortSi
     // Exclude a renamed copy only when the canonical rollout is present too.
     // Otherwise retain an unknown row so the coverage gap stays visible.
     if (meta && meta.id !== file.id && merged.has(meta.id)) continue
-    if (meta?.id === file.id) fallback.set(file.id, meta)
+    if (meta?.id === file.id) fallback.set(file.id, { source: meta.source, cwd: meta.cwd })
     verified.push(file)
   }
 
@@ -256,6 +259,7 @@ export async function listLocalCodexInventory(codexHome: string, signal: AbortSi
       const parentThreadId = row?.parentThreadId ?? source.parentThreadId
       return {
         id: file.id,
+        ...(row?.cwd ?? fallback.get(file.id)?.cwd ? { cwd: row?.cwd ?? fallback.get(file.id)?.cwd } : {}),
         ...(row?.name ? { name: row.name } : {}),
         updatedAt,
         archived: file.archived,

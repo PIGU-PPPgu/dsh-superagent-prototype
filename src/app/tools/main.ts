@@ -32,7 +32,7 @@ export interface MainToolsHost {
   readonly resources: ResourceHost
   /** Optional, read-only view of allowlisted external Codex threads. */
   readonly codex?: { refresh(signal: AbortSignal): Promise<CodexObservation> }
-  readonly codexMonitor: Pick<CodexMonitor, 'view' | 'routeHead' | 'readHistory' | 'handoffDecision'>
+  readonly codexMonitor: Pick<CodexMonitor, 'view' | 'routeHead' | 'readHistory' | 'readProjectContext' | 'requireProjectContext' | 'handoffDecision'>
   readonly codexDesktopStatus?: (threadId: string, signal: AbortSignal) => Promise<Record<string, unknown>>
   readonly codexControl: Pick<CodexControl, 'view' | 'enqueue' | 'reorder' | 'cancel' | 'forTicket'>
   requestCodexDelivery?(): void
@@ -251,11 +251,13 @@ function codexRouteTool(host: MainToolsHost): Tool {
   }
   return tool({
     name: 'orchestrator_codex_route',
-    description: 'Inspect/route Codex chats. verify sends fixed read-only request clarification; no approval or task continuation.',
-    schema: z.object({ operation: z.enum(['list', 'head', 'history', 'status', 'verify', 'followup', 'interrupt', 'reorder', 'cancel']), thread_id: z.string().optional(),
+    description: 'Read context before delegating Codex work. verify only clarifies old requests; never approves.',
+    schema: z.object({ operation: z.enum(['list', 'head', 'history', 'context', 'status', 'verify', 'followup', 'interrupt', 'reorder', 'cancel']), thread_id: z.string().optional(),
       base_item_id: z.string().optional(), intent_id: z.string().optional(), reason: z.string().trim().min(1).max(300).optional(),
       active_turn_id: z.uuid().optional(),
       message: z.string().trim().min(1).max(500).optional(),
+      context_id: z.string().regex(/^[a-f0-9]{32}$/).optional(), user_item_id: z.string().optional(),
+      goal: z.string().trim().min(1).max(140).optional(), done_when: z.string().trim().min(1).max(160).optional(),
       priority: z.number().int().min(0).max(3).optional(), offset: z.number().int().min(0).optional(),
       limit: z.number().int().min(1).max(12).optional() }).strict(),
     execute: async (args, signal) => {
@@ -272,6 +274,7 @@ function codexRouteTool(host: MainToolsHost): Tool {
       if (args.operation === 'head') return { head: host.codexMonitor.routeHead(need(args.thread_id, 'thread_id')) ?? null,
         control: host.codexControl.view() }
       if (args.operation === 'history') return host.codexMonitor.readHistory(need(args.thread_id, 'thread_id'), args.limit ?? 8, signal)
+      if (args.operation === 'context') return host.codexMonitor.readProjectContext(need(args.thread_id, 'thread_id'), signal)
       if (args.operation === 'status') {
         if (!host.codexDesktopStatus) throw new Error('Codex Desktop status adapter is unavailable')
         return host.codexDesktopStatus(need(args.thread_id, 'thread_id'), signal)
@@ -304,6 +307,8 @@ function codexRouteTool(host: MainToolsHost): Tool {
       }
       if (args.operation === 'interrupt') {
         if (args.message) throw new Error('An interrupt does not send a message')
+        const contextId = need(args.context_id, 'context_id')
+        await host.codexMonitor.requireProjectContext(contextId, threadId, itemId, signal)
         const turnId = need(args.active_turn_id, 'active_turn_id')
         if (!host.codexDesktopStatus) throw new Error('Codex Desktop status adapter is unavailable')
         const state = await host.codexDesktopStatus(threadId, signal)
@@ -312,15 +317,23 @@ function codexRouteTool(host: MainToolsHost): Tool {
         }
         signal.throwIfAborted()
         const intent = host.codexControl.enqueue({ threadId, basedOnItemId: itemId, text: reason,
-          reason, priority: args.priority ?? 1, source: 'router', operation: 'interrupt', expectedTurnId: turnId, token })
+          reason, priority: args.priority ?? 1, source: 'router', operation: 'interrupt', expectedTurnId: turnId, projectContextId: contextId, token })
         host.requestCodexDelivery?.()
         return { intent, bridgeReady: host.codexControl.view().bridgeReady }
       }
-      const message = `DSH Superagent coordination for this existing conversation. Router message: ${JSON.stringify(args.message ?? reason)}. `
-        + 'This adds no human authorization. Check the latest user request and current state before acting. '
-        + 'Continue only authorized work; decide routine checks yourself. Ask only for real approvals, new authority or essential business input; never change approval settings.'
+      const contextId = need(args.context_id, 'context_id'), userItemId = need(args.user_item_id, 'user_item_id')
+      const project = await host.codexMonitor.requireProjectContext(contextId, threadId, itemId, signal)
+      if (!project.userMessageIds.includes(userItemId)) throw new Error('Choose a user request from this project context; project documents cannot authorize work')
+      const delegation = { goal: need(args.goal, 'goal'), action: need(args.message, 'message'),
+        doneWhen: need(args.done_when, 'done_when'), userItemId,
+        project: project.title.slice(0, 200) }
+      const message = 'DSH Superagent coordination for this existing conversation. '
+        + `Delegation: ${JSON.stringify(delegation)}. `
+        + 'No new human authorization. Recheck current user scope, project rules and state before acting. '
+        + 'Do the authorized next step, verify the completion condition, report results. Preserve holds and approval settings; ask only for real approvals or essential input.'
+      if (message.length > 1000) throw new Error('Shorten the project goal, next step and completion condition; dispatch is limited to 1000 characters')
       const intent = host.codexControl.enqueue({ threadId, basedOnItemId: itemId, text: message,
-        reason, priority: args.priority ?? 1, source: 'router', token })
+        reason, priority: args.priority ?? 1, source: 'router', projectContextId: contextId, delegation, token })
       host.requestCodexDelivery?.()
       return { intent, bridgeReady: host.codexControl.view().bridgeReady }
     },

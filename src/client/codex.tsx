@@ -131,8 +131,10 @@ export function CodexPage() {
         : (chinese ? '等待 Codex Desktop 连接' : 'Waiting for Codex Desktop')}</p>
       {!!control.intents.length && <ul className="dt-list dt-cards">{control.intents.slice(0, 5).map(intent =>
         <li className="dt-row" key={intent.id}><div className="dt-row-main">
-          <strong>{intent.threadId}</strong>
-          <p className="dt-row-quote dt-clamp">{intent.reason}</p>
+          <strong>{intent.delegation?.project ?? intent.threadId}</strong>
+          <p className="dt-row-quote dt-clamp">{intent.delegation?.goal ?? intent.reason}</p>
+          {intent.delegation && <details><summary>{chinese ? '派发详情' : 'Delegation'}</summary>
+            <p>{intent.delegation.action}</p><p>{intent.delegation.doneWhen}</p></details>}
           <div className="dt-row-meta"><span>{intent.operation === 'verify' ? (chinese ? '核实请求' : 'Verify request') : intent.operation === 'interrupt'
             ? (chinese ? '中断' : 'Interrupt') : (chinese ? '后续消息' : 'Follow-up')}</span>
             <span>{intent.status}</span><span>{timeText(intent.updatedAt, chinese)}</span></div>

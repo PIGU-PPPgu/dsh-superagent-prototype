@@ -6,7 +6,7 @@ import type { CodexMonitor } from './codex-monitor.ts'
 type Client = Pick<CodexDesktopIpc, 'readState' | 'startText' | 'interruptTurn' | 'close'>
 interface DeliveryHost {
   control: Pick<CodexControl, 'view' | 'setBridgeAvailable' | 'claim' | 'finish' | 'releaseUnsent' | 'setEnabled'>
-  monitor: Pick<CodexMonitor, 'routeHead' | 'readHistory'>
+  monitor: Pick<CodexMonitor, 'routeHead' | 'readHistory'> & Partial<Pick<CodexMonitor, 'requireProjectContext' | 'isProjectContextCurrent'>>
   signal: AbortSignal
   paused(): boolean
   relay(id: string, text: string): void
@@ -93,6 +93,16 @@ export class CodexDelivery {
         }
         const history = await this.host.monitor.readHistory(intent.threadId, 1, this.signal)
         if (history.headItemId !== intent.basedOnItemId) { this.failQueued(intent, 'stale-history-head'); return }
+        if (intent.projectContextId) {
+          if (!this.host.monitor.requireProjectContext || !this.host.monitor.isProjectContextCurrent) {
+            this.failQueued(intent, 'project-context-unavailable'); return
+          }
+          try { await this.host.monitor.requireProjectContext(intent.projectContextId, intent.threadId, intent.basedOnItemId, this.signal) }
+          catch {
+            if (this.signal.aborted || this.host.paused()) return
+            this.failQueued(intent, 'project-context-changed'); return
+          }
+        }
         if (!this.host.control.view().enabled || this.signal.aborted || this.host.paused()) return
         const claimed = this.host.control.claim(intent.id)
         try {
@@ -101,6 +111,7 @@ export class CodexDelivery {
             return !this.signal.aborted && !this.host.paused() && this.host.control.view().enabled
               && !!current?.present && !current.archived && current.ready && !current.pausedByUser
               && (!verification || current.verificationRequestId === intent.verificationRequestId)
+              && (!intent.projectContextId || this.host.monitor.isProjectContextCurrent?.(intent.projectContextId, intent.threadId, intent.basedOnItemId) === true)
               && (!current.needsYou || verification) && current.lastItemId === intent.basedOnItemId
           }
           const result = interrupt ? await client.interruptTurn(state, this.signal, canSend)

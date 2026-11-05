@@ -1,6 +1,14 @@
 import { key } from '../../src/core/index.ts'
 import { KV, record } from '../../src/kv.ts'
 import type { Store } from '../../src/app/store.ts'
+import type { CodexRoutingContext } from '../../src/app/codex-monitor.ts'
+
+export const testCodexRoutingContext = (threadId: string, headItemId: string): CodexRoutingContext => ({
+  threadId, title: 'Build task', headItemId, contextId: 'a'.repeat(32), readAt: '2026-11-05T08:00:00Z',
+  userMessageIds: ['user-goal'], project: { name: 'Build project' },
+  initialRequest: { id: 'user-goal', turnId: 'initial-turn', role: 'user', text: 'Complete the build and verification; do not push.' },
+  messages: [], documents: [], coverage: { initialRequestFound: true, recentComplete: false, gaps: [] },
+})
 
 interface FixtureMonitor { version: 1; enabled: boolean; initialized: boolean; scannedAt?: string;
   autoHandoffEnabled?: boolean; autoHandoffEnabledAt?: string; autoHandoffRevision?: number; threads: Record<string, Record<string, unknown>> }

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { CodexDesktopIpc, type CodexDesktopState } from '../src/codex/desktop-ipc.ts'
 import type { CodexMonitor } from '../src/app/codex-monitor.ts'
 import { startRuntime, type Host } from './fixtures/host.ts'
+import { testCodexRoutingContext } from './fixtures/codex.ts'
 
 let host: Host
 beforeEach(async () => { host = await startRuntime() })
@@ -15,6 +16,8 @@ function setup() {
       baselined: true, lastItemId: 'head-a', context: [], updatedAt: new Date().toISOString() },
   } })
   const monitor = (host.runtime as unknown as { codexMonitor: CodexMonitor }).codexMonitor
+  const context = testCodexRoutingContext(threadId, 'head-a')
+  vi.spyOn(monitor, 'requireProjectContext').mockResolvedValue(context)
   vi.spyOn(monitor, 'readHistory').mockResolvedValue({ threadId, title: 'Task', source: 'persisted Codex history',
     readAt: new Date().toISOString(), complete: false, headItemId: 'head-a', messages: [] })
   const state: CodexDesktopState = { threadId, clientId: randomUUID(), revision: 1, status: 'active',
@@ -27,7 +30,7 @@ function setup() {
   host.runtime.codexControl.setEnabled(true)
   const run = (extra = {}) => host.runTool(host.runtime.masterId, 'orchestrator_codex_route', {
     operation: 'interrupt', thread_id: threadId, base_item_id: 'head-a', active_turn_id: turnId,
-    reason: 'Reprioritize authorized work', ...extra,
+    context_id: context.contextId, reason: 'Reprioritize authorized work', ...extra,
   })
   return { state, client, run }
 }

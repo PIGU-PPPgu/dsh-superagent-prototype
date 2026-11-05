@@ -2,12 +2,14 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { homedir } from 'node:os'
+import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { family, record } from '../kv.ts'
 import { key, ticketStage, type TicketStage } from '../core/index.ts'
 import { CodexStdioReadRpc } from '../codex/stdio.ts'
 import { listLocalCodexInventory } from '../codex/local-inventory.ts'
 import { listAllCodexThreads, readLatestCodexTurn, readRecentCodexMessages, type MonitoredCodexThread } from '../codex/monitor-read.ts'
+import { isCodexUserRequest, readCodexProjectContext, type CodexProjectContext } from '../codex/project-context.ts'
 import { buildCodexTriagePrompt, currentRequestText, hasUserDecisionRequest, parseCodexTriageDecision, userDecisionRequest,
   type CodexTriageDecision, type CodexTriageInput,
   type CodexTriageStage } from '../codex/triage.ts'
@@ -162,6 +164,13 @@ export interface CodexHistoryView {
   headItemId?: string
   messages: { id: string; turnId: string; role: 'user' | 'assistant'; text: string; chars?: number }[]
 }
+export interface CodexRoutingContext extends CodexProjectContext {
+  contextId: string
+  userMessageIds: string[]
+}
+interface ContextReceipt { data: CodexRoutingContext; fingerprint: string; expiresAt: number; generation: number;
+  sourceCwd?: string; sourceRepository?: string }
+const contextFingerprint = ({ readAt: _readAt, ...data }: CodexProjectContext) => key('codex-context', JSON.stringify(data))
 
 /** Identify the sentence containing the quoted request or failure, excluding earlier progress sentences. */
 function issueKey(kind: 'human' | 'technical' | 'agent', text: string | undefined, evidence: string | undefined): string {
@@ -254,6 +263,7 @@ function combineInventory(local: readonly MonitoredCodexThread[], rpc: readonly 
       sourceKind: row.sourceKind === 'unknown' ? file.sourceKind : row.sourceKind,
       parentThreadId: row.parentThreadId ?? file.parentThreadId,
       repository: row.repository ?? file.repository,
+      cwd: row.cwd ?? file.cwd,
       updatedAt: maxTime(file.updatedAt, row.updatedAt),
     } : row)
   }
@@ -304,7 +314,9 @@ export class CodexMonitor {
   private readonly now: () => Date
   private timer?: ReturnType<typeof setTimeout>
   private running?: Promise<void>
-  private readonly historyReads = new Set<Promise<CodexHistoryView>>()
+  private readonly historyReads = new Set<Promise<unknown>>()
+  private readonly projectContexts = new Map<string, ContextReceipt>()
+  private projectContextGeneration = 0
   private controller = new AbortController()
   private started = false
 
@@ -361,6 +373,81 @@ export class CodexMonitor {
     })()
     this.historyReads.add(reading)
     try { return await reading } finally { this.historyReads.delete(reading) }
+  }
+
+  /** Bounded project facts and original/recent messages, bound to this conversation's saved head. */
+  private async projectContext(threadId: string, signal: AbortSignal): Promise<CodexProjectContext> {
+    const row = this.state().threads[threadId], head = this.routeHead(threadId)
+    if (!this.state().enabled || !row || !isMain(row) || !head?.present || head.archived || !head.ready || !head.lastItemId) {
+      throw new Error('Codex project context is unavailable; read a monitored main conversation first')
+    }
+    const combined = AbortSignal.any([signal, this.controller.signal])
+    const reading = (async () => {
+      const rpc = await this.connect(combined)
+      try {
+        const data = await readCodexProjectContext(rpc, { threadId, title: head.title,
+          cwd: row.cwd, repository: row.repository, headItemId: head.lastItemId! }, combined)
+        combined.throwIfAborted()
+        const current = this.state().threads[threadId], latest = this.routeHead(threadId)
+        if (!latest?.present || latest.archived || !latest.ready || latest.lastItemId !== data.headItemId
+          || current?.cwd !== row.cwd || current?.repository !== row.repository) {
+          throw new Error('Codex project context changed; read context again')
+        }
+        return data
+      } finally { rpc.close() }
+    })()
+    this.historyReads.add(reading)
+    try { return await reading } finally { this.historyReads.delete(reading) }
+  }
+
+  async readProjectContext(threadId: string, signal: AbortSignal): Promise<CodexRoutingContext> {
+    const generation = this.projectContextGeneration, source = this.state().threads[threadId]
+    const context = await this.projectContext(threadId, signal), fingerprint = contextFingerprint(context)
+    const current = this.state()
+    if (generation !== this.projectContextGeneration || !current.enabled || current.threads[threadId]?.lastItemId !== context.headItemId
+      || current.threads[threadId]?.cwd !== source?.cwd || current.threads[threadId]?.repository !== source?.repository) {
+      throw new Error('Codex project context changed; read context again')
+    }
+    const contextId = key('codex-routing-context', threadId, context.headItemId, fingerprint,
+      String(this.projectContextGeneration), randomUUID())
+    const userMessageIds = [...new Set([...(context.initialRequest ? [context.initialRequest] : []), ...context.messages]
+      .filter(message => message.role === 'user' && isCodexUserRequest(message.text))
+      .map(message => message.id))]
+    const data = { ...context, contextId, userMessageIds }
+    this.projectContexts.delete(contextId)
+    for (const [id, receipt] of this.projectContexts) {
+      if (receipt.data.threadId === threadId && receipt.fingerprint !== fingerprint) this.projectContexts.delete(id)
+    }
+    this.projectContexts.set(contextId, { data: structuredClone(data), fingerprint, expiresAt: this.now().getTime() + 10 * 60_000,
+      generation, sourceCwd: source?.cwd, sourceRepository: source?.repository })
+    while (this.projectContexts.size > 32) this.projectContexts.delete(this.projectContexts.keys().next().value!)
+    return data
+  }
+
+  /** A context receipt is knowledge of a snapshot, never a new grant of authority. */
+  async requireProjectContext(contextId: string, threadId: string, headItemId: string, signal: AbortSignal): Promise<CodexRoutingContext> {
+    const receipt = this.projectContexts.get(contextId)
+    if (!receipt || !this.isProjectContextCurrent(contextId, threadId, headItemId)) {
+      throw new Error('Read fresh project context for this conversation before delegating')
+    }
+    const current = await this.projectContext(threadId, signal)
+    if (this.projectContexts.get(contextId) !== receipt || !this.isProjectContextCurrent(contextId, threadId, headItemId)) {
+      throw new Error('Read fresh project context for this conversation before delegating')
+    }
+    if (contextFingerprint(current) !== receipt.fingerprint) {
+      this.projectContexts.delete(contextId)
+      throw new Error('Project context changed; read context and replan before delegating')
+    }
+    return structuredClone(receipt.data)
+  }
+
+  /** Cheap final wire guard; async validation must not revive an expired or revoked receipt. */
+  isProjectContextCurrent(contextId: string, threadId: string, headItemId: string): boolean {
+    const receipt = this.projectContexts.get(contextId), state = this.state(), row = state.threads[threadId]
+    return !!receipt && receipt.generation === this.projectContextGeneration && receipt.expiresAt > this.now().getTime()
+      && state.enabled && receipt.data.threadId === threadId && receipt.data.headItemId === headItemId
+      && !!row?.present && isMain(row) && !row.archived && !!row.baselined && !row.error && row.lastItemId === headItemId
+      && row.cwd === receipt.sourceCwd && row.repository === receipt.sourceRepository
   }
 
   view(offset = 0, limit = 50, scope: 'recent' | 'all' = 'recent'): CodexMonitorView {
@@ -449,6 +536,7 @@ export class CodexMonitor {
   }
   setEnabled(enabled: boolean): CodexMonitorView {
     const state = this.state()
+    if (state.enabled !== enabled) { this.projectContextGeneration++; this.projectContexts.clear() }
     this.save({ ...state, enabled })
     if (!enabled) { this.controller.abort(); if (this.timer) clearTimeout(this.timer) }
     else {
@@ -515,6 +603,8 @@ export class CodexMonitor {
     if (this.state().enabled) this.schedule(0)
   }
   async stop(): Promise<void> {
+    this.projectContextGeneration++
+    this.projectContexts.clear()
     this.started = false
     if (this.timer) clearTimeout(this.timer)
     this.controller.abort()
@@ -606,7 +696,8 @@ export class CodexMonitor {
       for (const candidate of discovered.filter(isMain)) {
         if (!candidate.archived && candidate.updatedAt && Date.parse(candidate.updatedAt) >= recentCutoff) continue
         const previous = threads[candidate.id]
-        if (previous && previous.updatedAt === candidate.updatedAt && previous.name === candidate.name
+        if (previous && previous.updatedAt === candidate.updatedAt && previous.name === candidate.name && previous.cwd === candidate.cwd
+          && previous.repository === candidate.repository
           && previous.archived === candidate.archived && previous.present) continue
         threads[candidate.id] = { ...(previous ?? { context: [] }), ...candidate, seenAt, checkedAt: seenAt,
           present: true, baselined: previous?.baselined ?? false,
@@ -645,7 +736,8 @@ export class CodexMonitor {
             && previous.error !== 'Codex model analysis unavailable')
         if (!changed) {
           if (!previous.present || previous.name !== candidate.name || previous.archived !== candidate.archived
-            || previous.sourceKind !== candidate.sourceKind || previous.parentThreadId !== candidate.parentThreadId) {
+            || previous.sourceKind !== candidate.sourceKind || previous.parentThreadId !== candidate.parentThreadId
+            || previous.cwd !== candidate.cwd || previous.repository !== candidate.repository) {
             this.commitThread(candidate.id, { ...previous, ...candidate, present: true, seenAt })
           }
           continue

@@ -5,6 +5,18 @@ import { usePanel, mount, click, tab, text } from './fixtures/panel.tsx'
 import { server } from './fixtures/panel-server.ts'
 
 usePanel()
+it('shows the project goal and delegation details instead of an opaque conversation id', async () => {
+  server.codexControl = { ...server.codexControl, enabled: true, bridgeReady: true, intents: [{
+    id: 'intent-a', threadId: 'thread-a', basedOnItemId: 'head-a', text: 'Host coordination message', reason: 'Technical routing reason',
+    priority: 1, status: 'sent', source: 'router', createdAt: '', updatedAt: '',
+    delegation: { project: '知识库重构', goal: '保留已发布内容并核实入口', action: '只读核查当前入口', doneWhen: '返回可用性与证据', userItemId: 'user-goal' },
+  }] }
+  await mount(); await click(tab(zh['tab.codex']))
+  expect(text()).toContain('知识库重构')
+  expect(text()).toContain('保留已发布内容并核实入口')
+  expect(text()).toContain('派发详情')
+  expect(text()).not.toContain('Host coordination message')
+})
 it('enables automatic observation from the Codex panel', async () => {
   await mount()
   await click(tab(zh['tab.codex']))
