@@ -16,7 +16,7 @@ import { CODEX_VERIFY_MESSAGE, isCodexVerification, type CodexControlIntent } fr
 
 const POLL_MS = 30_000
 const RESCAN_MS = 5 * 60_000
-const ASSESSMENT_VERSION = 6
+const ASSESSMENT_VERSION = 7
 const CONTEXT_MESSAGES = 12
 const CONTEXT_CHARS = 2_000
 const CHILD_STATUS_HOURS = 24

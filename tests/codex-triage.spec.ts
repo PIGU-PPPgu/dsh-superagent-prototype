@@ -332,6 +332,14 @@ it('keeps OS confirmation human-owned when it also mentions routine tests', () =
   { ...input, messages: [{ role: 'assistant', text }] })).toMatchObject({ needsAttention: true, stage: 'needsYou' })
 })
 
+it('preserves a real credential-entry request with a locative phrase and quoted login button', () => {
+  const text = '请直接在该窗口输入 Mac mini 原账号密码并点“登录”，完成后回复“已连接”。'
+  expect(hasUserDecisionRequest(text)).toBe(true)
+  expect(parseCodexTriageDecision(JSON.stringify({ needsAttention: true, stage: 'needsYou', kind: 'question',
+    reason: '需本人输入已有密码', action: '在原窗口登录', summary: '等待登录', evidence: text }),
+  { ...input, messages: [{ role: 'assistant', text }] })).toMatchObject({ needsAttention: true, stage: 'needsYou' })
+})
+
 it('routes an existing account capability check to DSH without granting permissions', () => {
   const text = '需要确认组织是否已开通知识小组功能，或当前账号是否有创建权限。'
   expect(hasUserDecisionRequest(text)).toBe(false)
