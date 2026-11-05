@@ -45,6 +45,21 @@ it('shows the DSH Router brief and keeps native control disabled until the bridg
   expect(server.requests).toContainEqual({ path: 'codex/control', method: 'POST', body: { enabled: true } })
 })
 
+it('labels routine work for DSH and counts only real human requests', async () => {
+  server.codex = { ...server.codex, enabled: true, total: 1, attentionTotal: 1, needsYouTotal: 0,
+    attention: [{ id: 'thread-a', title: '技术检查', sourceKind: 'vscode', archived: false, present: true,
+      attention: { itemId: 'a', at: '', decision: { needsAttention: true, kind: 'failure', stage: 'failed',
+        reason: '检查失败', action: '继续排查' } } }],
+    threads: [{ id: 'thread-a', title: '技术检查', sourceKind: 'vscode', archived: false, present: true, stage: 'needsAgent' }] }
+  server.codexRouter = { mainTotal: 1, recentTotal: 1, childTotal: 0, childChecked: 0, needsYou: 0, needsAgent: 1,
+    technical: 0, managed: 0, priorities: [{ threadId: 'thread-a', title: '技术检查', summary: '先读日志再补验证',
+      kind: 'needsAgent', task: 'continue', source: 'persisted Codex history' }], recent: [] }
+  await mount(); await click(tab(zh['tab.codex']))
+  expect(text()).toContain('由 DSH 处理')
+  expect(text()).toContain('0 个需要你')
+  expect(text()).not.toContain('需要你处理')
+})
+
 it('links a Codex handoff to its ticket and shows a failed handoff', async () => {
   server.codex = { enabled: true, autoHandoffEnabled: true, total: 2, recentTotal: 2,
     attentionTotal: 0, attention: [], managedTotal: 1,
@@ -65,7 +80,7 @@ it('links a Codex handoff to its ticket and shows a failed handoff', async () =>
 })
 
 it('surfaces an actionable Codex conversation on the overview and lets the person acknowledge it', async () => {
-  const attention = { decision: { needsAttention: true as const, kind: 'review' as const,
+  const attention = { decision: { needsAttention: true as const, kind: 'review' as const, stage: 'needsYou' as const,
     reason: '结果待审阅', action: '检查发布结果' }, at: '2026-11-01T12:00:00Z', itemId: 'item-new' }
   server.codex = { enabled: true, scannedAt: '2026-11-01T12:00:00Z', total: 1, recentTotal: 1, attentionTotal: 1,
     managedTotal: 0, managed: [],

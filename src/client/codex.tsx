@@ -9,6 +9,7 @@ const stages: Record<string, { zh: string; en: string }> = {
   progress: { zh: '最近进展', en: 'Recent progress' },
   reportedComplete: { zh: '报告完成', en: 'Reported complete' },
   needsYou: { zh: '需你处理', en: 'Needs you' },
+  needsAgent: { zh: 'DSH 待处理', en: 'For DSH' },
   blocked: { zh: '报告受阻', en: 'Reported blocked' },
   failed: { zh: '报告失败', en: 'Reported failed' },
   unknown: { zh: '待核对', en: 'Uncertain' },
@@ -51,6 +52,8 @@ export function CodexPage() {
   const monitor = data?.monitor
   const router = data?.router
   const control = data?.control
+  const human = monitor?.attention.filter(thread => thread.attention?.decision.stage === 'needsYou') ?? []
+  const humanTotal = monitor?.needsYouTotal ?? monitor?.attentionTotal ?? 0
   const listed = scope === 'recent' ? (monitor?.recentTotal ?? monitor?.total ?? 0) : (monitor?.total ?? 0)
   const linkedChildren = Math.max(0, (monitor?.childTotal ?? 0) - (monitor?.unlinkedTotal ?? 0))
   const changeScope = () => { setOffset(0); setScope(scope === 'recent' ? 'all' : 'recent') }
@@ -71,8 +74,8 @@ export function CodexPage() {
     {monitor?.error && <p className="dt-error" role="alert">{monitor.error}</p>}
     {monitor?.enabled && <div className="dt-hint">
       <div>{chinese
-        ? `最近 7 天 ${monitor.recentTotal ?? monitor.total} / 共 ${monitor.total} 个主会话 · ${linkedChildren} 个子线程 · ${monitor.attentionTotal} 个需要你 · ${monitor.managedTotal ?? 0} 个 DSH 工单`
-        : `Last 7 days: ${monitor.recentTotal ?? monitor.total} / ${monitor.total} main conversations · ${linkedChildren} child threads · ${monitor.attentionTotal} need you · ${monitor.managedTotal ?? 0} DSH tickets`}</div>
+        ? `最近 7 天 ${monitor.recentTotal ?? monitor.total} / 共 ${monitor.total} 个主会话 · ${linkedChildren} 个子线程 · ${humanTotal} 个需要你 · ${monitor.managedTotal ?? 0} 个 DSH 工单`
+        : `Last 7 days: ${monitor.recentTotal ?? monitor.total} / ${monitor.total} main conversations · ${linkedChildren} child threads · ${humanTotal} need you · ${monitor.managedTotal ?? 0} DSH tickets`}</div>
       <div>{chinese ? `历史快照 · 上次扫描 ${timeText(monitor.scannedAt, true)}`
         : `Stored history · scanned ${timeText(monitor.scannedAt, false)}`}</div>
       {!!monitor.recentChildTotal && <div>{chinese
@@ -101,6 +104,7 @@ export function CodexPage() {
           <strong>{item.title}</strong>
           <p className="dt-row-quote dt-clamp">{item.summary}</p>
           <div className="dt-row-meta"><span>{item.kind === 'needsYou' ? (chinese ? '需要你' : 'Needs you')
+            : item.kind === 'needsAgent' ? (chinese ? '由 DSH 处理' : 'Handled by DSH')
             : item.kind === 'ticketNeedsYou' ? (chinese ? 'DSH 工单待处理' : 'DSH ticket needs you')
               : item.kind === 'technical' ? (chinese ? '技术异常' : 'Technical issue')
                 : item.kind === 'ticketEnded' ? (chinese ? '工单已结束' : 'Ticket ended')
@@ -135,9 +139,9 @@ export function CodexPage() {
         </div></li>)}</ul>}
     </section>}
 
-    {!!monitor?.attentionTotal && <section>
-      <h3>{chinese ? '需要你处理' : 'Needs your attention'} · {monitor.attentionTotal}</h3>
-      <ul className="dt-list dt-cards">{monitor.attention.map(thread => <li className="dt-row dt-att" key={thread.id}>
+    {!!humanTotal && <section>
+      <h3>{chinese ? '需要你处理' : 'Needs your attention'} · {humanTotal}</h3>
+      <ul className="dt-list dt-cards">{human.map(thread => <li className="dt-row dt-att" key={thread.id}>
         <div className="dt-row-main">
           <strong>{thread.title}</strong>
           <p className="dt-row-quote dt-clamp">{thread.attention?.decision.reason}</p>
@@ -181,7 +185,8 @@ export function CodexPage() {
           {thread.error && <p className="dt-error">{chinese ? '归纳暂不可用' : 'Summary unavailable'}</p>}
           {thread.handoffError && <p className="dt-error" role="alert">{chinese ? '自动接单暂不可用'
             : 'Automatic handoff unavailable'}</p>}
-          <div className="dt-row-meta"><span>{thread.stage ? (chinese ? stages[thread.stage]?.zh : stages[thread.stage]?.en)
+          <div className="dt-row-meta"><span>{thread.pausedByUser ? (chinese ? '按用户要求暂停' : 'Paused by user')
+            : thread.stage ? (chinese ? stages[thread.stage]?.zh : stages[thread.stage]?.en)
             : (chinese ? '尚未归纳' : 'Not summarized')}</span>
             <span>{timeText(thread.activityAt ?? thread.updatedAt, chinese)}</span>
             {thread.repository && <span>{thread.repository}</span>}

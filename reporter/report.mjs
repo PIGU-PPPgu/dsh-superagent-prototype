@@ -3,9 +3,11 @@ import { createHash } from 'node:crypto'
 
 export const KIND_LABEL = {
   needsYou: '等你决定', technical: '技术异常', ticketNeedsYou: '工单等你处理', ticketResult: '工单有结果',
-  ticketEnded: '工单结束', reportedComplete: '会话已完成', childFailure: '子线程失败',
+  ticketEnded: '工单结束', reportedComplete: '会话已完成', childFailure: '子线程失败', needsAgent: 'DSH处理',
 }
 const RESULT_KINDS = new Set(['ticketResult', 'ticketEnded', 'reportedComplete'])
+const HUMAN_NEEDS_YOU = new Set(['needsYou', 'ticketNeedsYou'])
+const DSH_INTERNAL = new Set(['technical', 'childFailure', 'health', 'needsAgent'])
 const compact = (value, limit = 60) => {
   const text = String(value ?? '').replace(/\s+/g, ' ').trim()
   return text.length > limit ? `${text.slice(0, limit)}…` : text
@@ -41,10 +43,12 @@ export function attentionItems(snapshot) {
 
 /**
  * Identity of the report, independent of wording and ordering: a reworded summary or a rescan must not re-push.
- * Results and completed items stay in the fingerprint so a new result is always a new push.
+ * 只hash真人待办(needsYou/ticketNeedsYou)和结果；DSH内部处理(technical/childFailure/health/needsAgent)变化不触发新推送。
  */
 export function fingerprint(snapshot) {
-  const items = attentionItems(snapshot).map(item => [item.kind, item.threadId ?? '', item.ticketId ?? '', item.id])
+  const items = attentionItems(snapshot)
+    .filter(item => HUMAN_NEEDS_YOU.has(item.kind) || RESULT_KINDS.has(item.kind))
+    .map(item => [item.kind, item.threadId ?? '', item.ticketId ?? '', item.id])
   return createHash('sha256').update(JSON.stringify({
     items: items.sort(),
     paused: snapshot.state?.paused === true,
@@ -61,17 +65,20 @@ function lines(items, { empty = '现在没有需要你处理的事。', limit = 
 
 export function renderPush(snapshot) {
   const items = attentionItems(snapshot)
-  const waiting = items.filter(item => !item.result)
+  const waiting = items.filter(item => HUMAN_NEEDS_YOU.has(item.kind))
   const results = items.filter(item => item.result)
+  const dshInternal = items.filter(item => DSH_INTERNAL.has(item.kind))
   const head = [`**Superagent 播报** ${time(snapshot.at)}`]
   if (snapshot.state?.paused) head.push('执行器已暂停。')
-  head.push(`待你处理 ${waiting.length} 条，新结果 ${results.length} 条。`)
-  return [...head, '', lines([...waiting, ...results]), '', '回复「待办」看详情，「帮助」看命令。'].join('\n')
+  head.push(`待你处理 ${waiting.length} 条，新结果 ${results.length} 条${dshInternal.length ? `，DSH处理中 ${dshInternal.length} 条` : ''}。`)
+  const toShow = [...waiting, ...results]
+  return [...head, '', lines(toShow, { empty: '当前无人工待办或新结果。' }), '', '回复「待办」看详情，「帮助」看命令。'].join('\n')
 }
 
 export function renderAttention(snapshot) {
   const items = attentionItems(snapshot)
-  return ['**待你处理**', '', lines(items), '', items.length ? '在 Codex 原会话或 DSH 面板里处理；这里不做审批。' : ''].join('\n')
+  const humanItems = items.filter(item => HUMAN_NEEDS_YOU.has(item.kind))
+  return ['**待你处理**', '', lines(humanItems, { empty: '当前无人工待办。' }), '', humanItems.length ? '在 Codex 原会话或 DSH 面板里处理；这里不做审批。' : ''].join('\n')
 }
 
 export function renderStatus(snapshot) {
@@ -82,7 +89,7 @@ export function renderStatus(snapshot) {
     `**Superagent 状态** ${time(snapshot.at)}`,
     `- 执行器：${state?.paused ? '已暂停' : '运行中'}，进行中 ${overview?.executor?.running ?? 0}，排队 ${overview?.executor?.queued ?? 0}，上限 ${overview?.executor?.maxWorkers ?? '-'}`,
     `- Codex 监控：${monitor.enabled ? '开' : '关'}，自动接单 ${monitor.autoHandoffEnabled ? '开' : '关'}，会话控制 ${codex?.control?.enabled ? '开' : '关'}`,
-    `- 本机 Codex：主会话 ${monitor.total ?? 0}，近 ${monitor.recentTotal ?? 0}，等你决定 ${monitor.attentionTotal ?? 0}，接管工单 ${monitor.managedTotal ?? 0}`,
+    `- 本机 Codex：主会话 ${monitor.total ?? 0}，近 ${monitor.recentTotal ?? 0}，等你决定 ${monitor.needsYouTotal ?? codex?.router?.needsYou ?? 0}，接管工单 ${monitor.managedTotal ?? 0}`,
     `- 最近扫描：${monitor.scannedAt ? new Date(monitor.scannedAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : '未知'}`,
     `- 累计接收 ${overview?.flow?.received ?? 0} 条触发，接受 ${overview?.flow?.accepted ?? 0}，评估中 ${overview?.flow?.evaluating ?? 0}`,
     health.length ? `- 异常：${health.map(item => item.name).join('、')}` : '- 各循环健康：正常',
@@ -92,10 +99,14 @@ export function renderStatus(snapshot) {
 export function renderDigest(snapshot) {
   const router = snapshot.codex?.router ?? {}
   const recent = (router.recent ?? []).slice(0, 5)
+  const items = attentionItems(snapshot)
+  const dsh = items.filter(item => DSH_INTERNAL.has(item.kind))
+  const dshCount = dsh.length ? ` （DSH处理中 ${dsh.length}）` : ''
   return [
     `**Codex 简报** ${time(snapshot.at)}`,
-    `主会话 ${router.mainTotal ?? 0}，近期活跃 ${router.recentTotal ?? 0}，子线程 ${router.childTotal ?? 0}（已核 ${router.childChecked ?? 0}）。`,
-    `等你决定 ${router.needsYou ?? 0}，技术异常 ${router.technical ?? 0}，接管工单 ${router.managed ?? 0}。`,
+    `主会话 ${router.mainTotal ?? 0}，近期活跃 ${router.recentTotal ?? 0}，子线程 ${router.childTotal ?? 0}（已核 ${router.childChecked ?? 0}）${dshCount}。`,
+    `等你决定 ${router.needsYou ?? 0}，技术异常 ${router.technical ?? 0}，接管工单 ${router.managed ?? 0}。` +
+    (dsh.length ? ` DSH内部处理：${dsh.map(d => KIND_LABEL[d.kind] ?? d.kind).join('、')}` : ''),
     '', '**优先级**', lines(attentionItems(snapshot), { limit: 12 }),
     '', '**最近进展**',
     recent.length ? recent.map(item => `- ${compact(item.title, 40)}：${compact(item.summary, 70)}`).join('\n') : '暂无摘要。',

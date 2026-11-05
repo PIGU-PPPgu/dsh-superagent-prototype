@@ -18,7 +18,7 @@ export function seedCodexCandidate(store: Pick<Store, 'get' | 'set'>, threadId: 
       present: true, baselined: true, seenAt: enabledAt, checkedAt: enabledAt, lastItemId: itemId, lastAssistantItemId: itemId,
       autoHandoffBaselineItemId: 'baseline', autoHandoffFreshItemId: itemId, autoHandoffReadComplete: true,
       context: [{ id: itemId, role: 'assistant', text: 'The build failed' }],
-      assessment: { version: 4, at: enabledAt, itemId,
+      assessment: { version: 5, at: enabledAt, itemId,
         decision: { needsAttention: true, kind: 'failure', stage: 'failed', reason: 'Build failed',
           action: 'Investigate', summary: 'Build failed', evidence: 'The build failed' } },
       autoHandoff: { itemId, at: enabledAt, triggerId: key('codex-handoff', threadId, itemId), enabledAt } } } })

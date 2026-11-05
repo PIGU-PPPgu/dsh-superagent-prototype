@@ -8,13 +8,14 @@ import { key, ticketStage, type TicketStage } from '../core/index.ts'
 import { CodexStdioReadRpc } from '../codex/stdio.ts'
 import { listLocalCodexInventory } from '../codex/local-inventory.ts'
 import { listAllCodexThreads, readLatestCodexTurn, readRecentCodexMessages, type MonitoredCodexThread } from '../codex/monitor-read.ts'
-import { buildCodexTriagePrompt, hasUserDecisionRequest, parseCodexTriageDecision, userDecisionRequest,
+import { buildCodexTriagePrompt, currentRequestText, hasUserDecisionRequest, parseCodexTriageDecision, userDecisionRequest,
   type CodexTriageDecision, type CodexTriageInput,
   type CodexTriageStage } from '../codex/triage.ts'
 import type { Store } from './store.ts'
 
 const POLL_MS = 30_000
 const RESCAN_MS = 5 * 60_000
+const ASSESSMENT_VERSION = 5
 const CONTEXT_MESSAGES = 12
 const CONTEXT_CHARS = 2_000
 const CHILD_STATUS_HOURS = 24
@@ -27,7 +28,7 @@ const AuditKey = family<{ at: string; model: string; prompt: string; response: s
 interface StoredMessage { id: string; turnId?: string; role: 'user' | 'assistant'; text: string }
 interface Attention { decision: CodexTriageDecision; at: string; itemId: string; requestKey?: string;
   acknowledgedAt?: string }
-interface Assessment { decision: CodexTriageDecision; at: string; itemId: string; issueKey?: string; version: 4 }
+interface Assessment { decision: CodexTriageDecision; at: string; itemId: string; issueKey?: string; version: number }
 interface ChildTurn { updatedAt?: string; checkedAt: string; turnId?: string; status?: string; error?: string }
 interface HandoffRecord { itemId: string; at: string; ticketId: string }
 interface AutoHandoffRecord { itemId: string; at: string; ticketId?: string; triggerId?: string; intentId?: string;
@@ -41,6 +42,7 @@ interface StoredThread extends MonitoredCodexThread {
   lastItemId?: string
   lastAssistantItemId?: string
   userDecisionRequested?: boolean
+  userHold?: boolean
   latestTurnId?: string
   latestTurnStatus?: string
   context: StoredMessage[]
@@ -91,6 +93,7 @@ export interface CodexMonitorThreadView {
   assessmentItemId?: string
   assessmentEvidence?: string
   assessmentKey?: string
+  agentAction?: string
   summary?: string
   childCount?: number
   childErrors?: number
@@ -98,6 +101,8 @@ export interface CodexMonitorThreadView {
   activityAt?: string
   error?: string
   attention?: Attention
+  attentionVerified?: boolean
+  pausedByUser?: boolean
   handoffTicketId?: string
   handoffTriggerId?: string
   routeIntentId?: string
@@ -124,6 +129,7 @@ export interface CodexMonitorView {
   unclassifiedTotal?: number
   recentTotal?: number
   attentionTotal: number
+  needsYouTotal?: number
   attention: CodexMonitorThreadView[]
   managedTotal: number
   managed: CodexMonitorThreadView[]
@@ -141,6 +147,7 @@ export interface CodexRouteHead {
   present: boolean
   archived: boolean
   needsYou: boolean
+  pausedByUser?: boolean
   ready: boolean
 }
 export interface CodexHistoryView {
@@ -154,7 +161,7 @@ export interface CodexHistoryView {
 }
 
 /** Identify the sentence containing the quoted request or failure, excluding earlier progress sentences. */
-function issueKey(kind: 'human' | 'technical', text: string | undefined, evidence: string | undefined): string {
+function issueKey(kind: 'human' | 'technical' | 'agent', text: string | undefined, evidence: string | undefined): string {
   const at = evidence && text ? text.lastIndexOf(evidence) : -1
   const whole = (text ?? evidence ?? '').replace(/\s+/g, ' ').trim()
   if (at < 0) return key(`codex-${kind}-issue`, whole)
@@ -197,6 +204,23 @@ export interface CodexMonitorDeps {
 
 const initial = (): StoredMonitor => ({ version: 1, enabled: false, initialized: false, threads: {} })
 const errorText = (_error: unknown) => 'Codex inventory unavailable'
+
+/** A person's explicit pause survives status questions and DSH coordination messages. */
+function userHold(messages: readonly StoredMessage[], held = false): boolean {
+  for (const message of messages) {
+    if (message.role !== 'user' || message.text.startsWith('DSH Superagent coordination for this existing conversation.')) continue
+    const text = currentRequestText(message.text)
+    const pause = /(?:^|[。！？.!?\n；;，,])\s*(?:请|先|请先|现在|暂时)?\s*(?:停止|暂停|停下|不要继续|先别继续)(?:一下)?(?:[^。！？\n]{0,48}(?:直到|等我|等你|等用户|除非)[^。！？\n]{0,24}(?:说|确认|回复|通知|允许|同意)|(?:当前|这个|本)?(?:任务|对话|工作)?(?:一下)?\s*(?:[。！!，,；;]|$))/.test(text)
+      || /(?:^|[.!?\n;])\s*(?:please\s+)?(?:stop|pause|hold|do not continue)\b[^.!?\n]{0,60}\buntil\s+(?:i|you|the user)\s+(?:say|tell|allow|instruct)\b/i.test(text)
+      || /^\s*(?:please\s+)?(?:stop|pause|hold|do not continue)(?:\s+(?:this|the|current))?(?:\s+(?:task|work|conversation))?[.!]?\s*$/i.test(text)
+    if (pause) held = true
+    else if (text.split(/[。！!\n；;，,]/).some(clause => !/[?？]|(?:怎么样|怎样|如何|到哪|吗|么|呢)(?:了)?\s*$/.test(clause)
+      && !/只有|如果|除非|直到|等我|等到|(?:必须|需要|要)先.{0,24}(?:同意|批准|确认|授权|回复)|(?:继续|恢复).{0,24}(?:之前|前)\s*(?:必须|需要|请|先|要|需|得|等|应)|\b(?:before|until|unless|if|when|after|must|require)\b/i.test(clause)
+      && (/^\s*(?:请|现在|可以|允许)?\s*(?:继续|恢复)(?=$|\s|执行|处理|工作|排查|检查|验证|任务|推进|修复|吧)/.test(clause)
+        || /^\s*(?:please\s+)?(?:resume|continue|go ahead)(?=$|\s)/i.test(clause)))) held = false
+  }
+  return held
+}
 const isChild = (row: MonitoredCodexThread): boolean =>
   !!row.parentThreadId || row.sourceKind.startsWith('subAgent')
 const isMain = (row: MonitoredCodexThread): boolean => !isChild(row) && row.sourceKind !== 'unknown'
@@ -292,7 +316,8 @@ export class CodexMonitor {
       ...(row.assessment?.decision.summary ? { summary: row.assessment.decision.summary } : {}),
       ...(row.assessment?.decision.stage ? { stage: row.assessment.decision.stage } : {}),
       ...(row.assessment?.itemId ? { assessmentItemId: row.assessment.itemId } : {}),
-      needsYou: row.assessment?.decision.stage === 'needsYou' || row.userDecisionRequested === true }
+      needsYou: row.assessment?.decision.stage === 'needsYou' || row.userDecisionRequested === true || row.userHold === true,
+      ...(row.userHold ? { pausedByUser: true } : {}) }
   }
 
   /** Give the DSH main Session bounded stored context without claiming a live Desktop state. */
@@ -331,6 +356,8 @@ export class CodexMonitor {
     const recentCutoff = this.now().getTime() - 7 * 86_400_000
     const recent = roots.filter(row => !row.archived && Date.parse(activityAt(row)) >= recentCutoff)
     const shown = scope === 'all' ? roots : recent
+    const verifiedAttention = (row: StoredThread) => row.attention?.decision.stage !== 'needsYou'
+      || row.context.some(message => message.role === 'assistant' && message.id === row.attention?.itemId)
     const display = (row: StoredThread): CodexMonitorThreadView => ({
       id: row.id, title: row.name ?? row.id, sourceKind: row.sourceKind, archived: row.archived,
       present: row.present, ...(row.parentThreadId ? { parentThreadId: row.parentThreadId } : {}),
@@ -342,13 +369,15 @@ export class CodexMonitor {
       ...(row.assessment?.itemId ? { assessmentItemId: row.assessment.itemId } : {}),
       ...(row.assessment?.decision.evidence ? { assessmentEvidence: row.assessment.decision.evidence } : {}),
       ...(row.assessment?.issueKey ? { assessmentKey: row.assessment.issueKey } : {}),
+      ...(row.assessment?.decision.stage === 'needsAgent' ? { agentAction: row.assessment.decision.action } : {}),
       ...(row.assessment?.decision.summary ? { summary: row.assessment.decision.summary } : {}),
       childCount: childStats[row.id]?.count ?? 0,
       childErrors: childStats[row.id]?.errors ?? 0,
       childReadErrors: childStats[row.id]?.readErrors ?? 0,
       activityAt: activityAt(row),
       ...(row.error ? { error: row.error } : {}),
-      ...(row.attention ? { attention: row.attention } : {}),
+      ...(row.attention ? { attention: row.attention, attentionVerified: verifiedAttention(row) } : {}),
+      ...(row.userHold ? { pausedByUser: true } : {}),
       ...(row.autoHandoff?.ticketId ? { handoffTicketId: row.autoHandoff.ticketId } : {}),
       ...(row.autoHandoff?.triggerId ? { handoffTriggerId: row.autoHandoff.triggerId } : {}),
       ...(row.autoHandoff?.intentId ? { routeIntentId: row.autoHandoff.intentId } : {}),
@@ -357,6 +386,7 @@ export class CodexMonitor {
       ...(row.autoHandoff?.error ? { handoffError: row.autoHandoff.error } : {}),
     })
     const attention = roots.filter(row => !row.archived && row.attention?.decision.needsAttention
+      && verifiedAttention(row)
       && !row.attention.acknowledgedAt
       && !((row.autoHandoff?.ticketId || row.autoHandoff?.intentId)
         && row.autoHandoff.itemId === row.attention.itemId
@@ -393,7 +423,8 @@ export class CodexMonitor {
       ...(state.inventoryUnresolvedParentTotal !== undefined
         ? { unresolvedParentTotal: state.inventoryUnresolvedParentTotal } : {}),
       unclassifiedTotal: state.inventoryUnclassifiedTotal ?? present.filter(row => row.sourceKind === 'unknown').length,
-      attentionTotal: attention.length, attention: attention.slice(0, 50).map(display),
+      attentionTotal: attention.length, needsYouTotal: attention.filter(row => row.attention?.decision.stage === 'needsYou').length,
+      attention: attention.slice(0, 50).map(display),
       managedTotal: managed.length, managed: managed.slice(0, 50),
       threads: shown.slice(offset, offset + limit).map(display),
       ...(offset + limit < shown.length ? { nextOffset: offset + limit } : {}) }
@@ -592,7 +623,7 @@ export class CodexMonitor {
         const changed = !previous || previous.updatedAt !== candidate.updatedAt
           || (previous.error !== undefined && previous.error !== 'Codex model analysis unavailable')
           || !previous.checkedAt || Date.parse(seenAt) - Date.parse(previous.checkedAt) >= RESCAN_MS
-          || (!candidate.archived && previous.assessment?.version !== 4
+          || (!candidate.archived && previous.assessment?.version !== ASSESSMENT_VERSION
             && previous.error !== 'Codex model analysis unavailable')
         if (!changed) {
           if (!previous.present || previous.name !== candidate.name || previous.archived !== candidate.archived
@@ -624,6 +655,7 @@ export class CodexMonitor {
             continue
           }
           const context = contextOf(previous?.context ?? [], recent.messages)
+          const held = userHold(previous?.assessment?.version === ASSESSMENT_VERSION ? recent.messages : context, previous?.userHold)
           const newAssistant = recent.messages.some(message => message.role === 'assistant')
           const newUser = recent.messages.some(message => message.role === 'user')
           const latestAssistantId = recent.latestAssistantItemId ?? (newAssistant ? undefined : previous?.lastAssistantItemId)
@@ -637,7 +669,7 @@ export class CodexMonitor {
           let attention = previous?.attention
           let assessment = previous?.assessment
           let userDecisionRequested = previous?.userDecisionRequested ?? false
-          const reconcile = previous?.assessment?.version !== 4
+          const reconcile = previous?.assessment?.version !== ASSESSMENT_VERSION
           if (!candidate.archived && (context.at(-1)?.role === 'assistant' || statusChanged)
             && (newAssistant || statusChanged || reconcile)) {
             const input: CodexTriageInput = { threadId: candidate.id, title: candidate.name,
@@ -653,42 +685,46 @@ export class CodexMonitor {
                 reason: '最新助手消息需要你处理', action: '打开原会话处理请求',
                 summary: '等待处理最新助手请求', evidence: assistantRequest.evidence } as CodexTriageDecision
             })
-            const classified: CodexTriageDecision = assistantRequest && decision.stage !== 'needsYou'
+            const classified: CodexTriageDecision = held
+              ? { needsAttention: false, kind: 'none', stage: 'unknown', reason: '遵守用户暂停', action: '保持暂停', summary: '按用户要求暂停，等待明确恢复' }
+              : assistantRequest && decision.stage !== 'needsYou'
               ? { needsAttention: true, stage: 'needsYou', kind: assistantRequest.kind,
                 reason: '最新助手消息需要你处理', action: '打开原会话处理请求',
                 summary: decision.summary, evidence: assistantRequest.evidence } : decision
             const fresh = previous?.baselined ? newAssistant || statusChanged
               : initialized && !previous?.suppressBaselineAlert
                 && Date.parse(candidate.updatedAt ?? seenAt) >= Date.parse(seenAt) - 10 * 60_000
-            const visible = classified.needsAttention && !fresh && !previous?.attention
+            const visible = (classified.needsAttention || classified.stage === 'needsAgent') && !fresh && !previous?.attention
               ? { ...classified, needsAttention: false, kind: 'none' as const, stage: 'unknown' as const,
                 reason: '历史请求未确认', action: '无需处理' } : classified
-            assessment = { decision: visible, at: seenAt, itemId, version: 4,
+            assessment = { decision: visible, at: seenAt, itemId, version: ASSESSMENT_VERSION,
               ...((visible.stage === 'failed' || visible.stage === 'blocked')
-                ? { issueKey: issueKey('technical', latestAssistantText, visible.evidence) } : {}) }
+                ? { issueKey: issueKey('technical', latestAssistantText, visible.evidence) }
+                : visible.stage === 'needsAgent' ? { issueKey: issueKey('agent', latestAssistantText, visible.evidence) } : {}) }
             const requestKey = visible.stage === 'needsYou'
               ? issueKey('human', latestAssistantText, visible.evidence) : undefined
             const latestAttention: Attention | undefined = visible.needsAttention && (fresh || !!previous?.attention)
               ? { decision: visible, at: seenAt, itemId, ...(requestKey ? { requestKey } : {}) } : undefined
             // Keep an unanswered human request visible while retaining the latest technical assessment.
-            const pending = previous?.attention?.decision.stage === 'needsYou' && !newUser
+            const reclassified = reconcile && previous?.attention?.itemId === itemId
+            const pending = previous?.attention?.decision.stage === 'needsYou' && !newUser && !reclassified && !held
             const sameRequest = visible.stage === 'needsYou'
               && previous?.attention?.decision.kind === visible.kind
               && previous.attention.requestKey === requestKey
             attention = pending && visible.stage !== 'reportedComplete'
               && (visible.stage !== 'needsYou' || sameRequest) ? previous.attention : latestAttention
-            userDecisionRequested = classified.stage === 'needsYou' || !!assistantRequest
-              || !newUser && classified.stage !== 'reportedComplete'
-              && (!!previous?.userDecisionRequested || previous?.attention?.decision.stage === 'needsYou')
+            userDecisionRequested = !held && (classified.stage === 'needsYou' || !!assistantRequest
+              || !newUser && !reclassified && classified.stage !== 'reportedComplete'
+              && (!!previous?.userDecisionRequested || previous?.attention?.decision.stage === 'needsYou'))
           } else if ((newUser || reconcile) && context.at(-1)?.role === 'user') {
             const itemId = context.at(-1)?.id ?? recent.newestItemId ?? candidate.id
-            assessment = { version: 4, at: seenAt, itemId, decision: { needsAttention: false,
-              kind: 'none', stage: 'progress', summary: '最近记录为用户消息，等待后续进展',
-              reason: '已收到用户消息', action: '无需处理' } }
+            assessment = { version: ASSESSMENT_VERSION, at: seenAt, itemId, decision: { needsAttention: false,
+              kind: 'none', stage: held ? 'unknown' : 'progress', summary: held ? '按用户要求暂停，等待明确恢复' : '最近记录为用户消息，等待后续进展',
+              reason: '已收到用户消息', action: held ? '保持暂停' : '无需处理' } }
             attention = undefined
             userDecisionRequested = false
           }
-          next = { ...candidate, seenAt, checkedAt: seenAt, present: true, baselined: true, context,
+          next = { ...candidate, seenAt, checkedAt: seenAt, present: true, baselined: true, context, userHold: held,
             ...(previous?.autoHandoffBaselineItemId !== undefined
               ? { autoHandoffBaselineItemId: previous.autoHandoffBaselineItemId } : {}),
             ...(previous?.autoHandoff ? { autoHandoff: previous.autoHandoff } : {}),
@@ -742,7 +778,7 @@ export class CodexMonitor {
         || (assessment?.decision.stage !== 'failed' && assessment?.decision.stage !== 'blocked')
         || !assessment.decision.evidence || row.context.at(-1)?.role !== 'assistant'
         || !row.context.at(-1)?.text.includes(assessment.decision.evidence)
-        || row.userDecisionRequested
+        || row.userDecisionRequested || row.userHold
         || hasUserDecisionRequest(row.context.at(-1)!.text)
         || !row.autoHandoffReadComplete || row.autoHandoffFreshItemId !== assessment.itemId
         || assessment.itemId !== row.context.at(-1)?.id

@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { attentionItems, fingerprint, renderPush } from '../report.mjs'
+import { attentionItems, fingerprint, renderPush, renderAttention } from '../report.mjs'
 import { shouldPush, inQuietHours } from '../daemon.mjs'
 
 const snapshot = items => ({
@@ -50,4 +50,74 @@ test('quiet hours handle a window that crosses midnight', () => {
   assert.equal(inQuietHours(new Date('2026-11-04T07:30:00+08:00'), '23:00', '08:00'), true)
   assert.equal(inQuietHours(new Date('2026-11-04T12:00:00+08:00'), '23:00', '08:00'), false)
   assert.equal(inQuietHours(new Date('2026-11-04T12:00:00+08:00'), undefined, undefined), false)
+})
+
+test('fingerprint ignores DSH internal (technical/childFailure/health/needsAgent)', () => {
+  const base = snapshot([{ kind: 'needsYou', threadId: 't1', title: 'x', summary: 's' }])
+  const withTechnical = snapshot([
+    { kind: 'needsYou', threadId: 't1', title: 'x', summary: 's' },
+    { kind: 'technical', threadId: 't2', title: 'tech', summary: 'tech issue' },
+  ])
+  const withAgent = snapshot([
+    { kind: 'needsYou', threadId: 't1', title: 'x', summary: 's' },
+    { kind: 'needsAgent', threadId: 't3', title: 'agent', summary: 'agent handling' },
+  ])
+  // DSH内部处理项不改变fingerprint
+  assert.equal(fingerprint(base), fingerprint(withTechnical))
+  assert.equal(fingerprint(base), fingerprint(withAgent))
+})
+
+test('fingerprint changes when human attention or results change', () => {
+  const needsYou1 = snapshot([{ kind: 'needsYou', threadId: 't1', title: 'x', summary: 's' }])
+  const needsYou2 = snapshot([{ kind: 'needsYou', threadId: 't2', title: 'x', summary: 's' }])
+  const withResult = snapshot([
+    { kind: 'needsYou', threadId: 't1', title: 'x', summary: 's' },
+    { kind: 'ticketResult', threadId: 't1', ticketId: 'k1', title: 'done', summary: 'finished' },
+  ])
+  // 真人待办或结果变化时fingerprint必须改变
+  assert.notEqual(fingerprint(needsYou1), fingerprint(needsYou2))
+  assert.notEqual(fingerprint(needsYou1), fingerprint(withResult))
+})
+
+test('renderPush only shows human attention and results, not DSH internal', () => {
+  const out = renderPush(snapshot([
+    { kind: 'needsYou', threadId: 't1', title: 'A', summary: 's1' },
+    { kind: 'technical', threadId: 't2', title: 'Tech', summary: 'tech issue' },
+    { kind: 'needsAgent', threadId: 't3', title: 'Agent', summary: 'agent work' },
+    { kind: 'ticketResult', threadId: 't1', ticketId: 'k1', title: 'Done', summary: 'result' },
+  ]))
+  // 应显示1条待办、1条结果、2条DSH处理
+  assert.match(out, /待你处理 1 条/)
+  assert.match(out, /新结果 1 条/)
+  assert.match(out, /DSH处理中 2 条/)
+  // 展示内容只包含真人待办和结果，不包含technical/needsAgent
+  assert.match(out, /等你决定.*A/)
+  assert.match(out, /工单有结果.*Done/)
+  assert.doesNotMatch(out, /Tech/)
+  assert.doesNotMatch(out, /Agent/)
+})
+
+test('renderAttention only shows human attention items, not DSH internal or results', () => {
+  const out = renderAttention(snapshot([
+    { kind: 'needsYou', threadId: 't1', title: 'A', summary: 's1' },
+    { kind: 'technical', threadId: 't2', title: 'Tech', summary: 'tech issue' },
+    { kind: 'needsAgent', threadId: 't3', title: 'Agent', summary: 'agent work' },
+    { kind: 'ticketResult', threadId: 't1', ticketId: 'k1', title: 'Done', summary: 'result' },
+  ]))
+  // 待办清单只包含真人待办
+  assert.match(out, /等你决定.*A/)
+  // 不包含DSH内部处理和结果
+  assert.doesNotMatch(out, /Tech/)
+  assert.doesNotMatch(out, /Agent/)
+  assert.doesNotMatch(out, /Done/)
+})
+
+test('renderPush shows empty message when no human attention or results', () => {
+  const out = renderPush(snapshot([
+    { kind: 'technical', threadId: 't2', title: 'Tech', summary: 'tech issue' },
+    { kind: 'needsAgent', threadId: 't3', title: 'Agent', summary: 'agent work' },
+  ]))
+  assert.match(out, /待你处理 0 条/)
+  assert.match(out, /新结果 0 条/)
+  assert.match(out, /当前无人工待办或新结果/)
 })

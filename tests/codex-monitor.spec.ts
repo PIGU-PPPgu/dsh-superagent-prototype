@@ -210,6 +210,101 @@ it('does not repeat an ignored candidate or accept one after auto intake is disa
   expect(() => monitor.handoffDecision(triggerId, { kind: 'accept', ticketId: 'late-ticket' })).toThrow('disabled')
 })
 
+it.each([
+  ['Outcome: 已完成31项测试。无字段或数据需要学校确认。', '需要学校确认'],
+  ['Outcome: 已部署。Risk: 你确认个人 Token Plan 额度已用尽，本轮未购买额度。', '你确认'],
+  ['Outcome: 巡检已恢复。只读写请求门禁阻挡。下一步由 Academy、审批及媒体负责人补齐合成实例。', '请求门禁阻挡。下一步由 Academy、审批'],
+])('reclassifies an old false approval for %s without keeping its old user gate', async (message, evidence) => {
+  const { store, monitor, setOldAssistantText, setDecision } = fixture()
+  setOldAssistantText(message)
+  monitor.setEnabled(true); await monitor.scanOnce()
+  const state = JSON.parse(store.db.prepare("select value from kv where key='codex-monitor-v1'").get()!.value as string)
+  const decision = { needsAttention: true, stage: 'needsYou', kind: 'approval', reason: '最新助手消息需要你处理',
+    action: '打开原会话处理请求', summary: '等待处理', evidence }
+  state.threads['thread-a'].assessment = { version: 4, at: state.scannedAt, itemId: 'answer-old', decision }
+  state.threads['thread-a'].attention = { at: state.scannedAt, itemId: 'answer-old', decision }
+  state.threads['thread-a'].userDecisionRequested = true
+  store.set('codex-monitor-v1', state)
+  setDecision(JSON.stringify({ needsAttention: false, stage: 'reportedComplete', kind: 'none',
+    reason: '已完成，本句不是用户待办', action: '无需处理', summary: '当前限定工作已完成' }))
+  await monitor.scanOnce()
+  expect(monitor.view().needsYouTotal).toBe(0)
+  expect(monitor.view().attentionTotal).toBe(0)
+  expect(monitor.routeHead('thread-a')).toMatchObject({ stage: 'reportedComplete', needsYou: false })
+})
+
+it('hands a fresh routine question to DSH without a human alert or a duplicate ticket', async () => {
+  const { store, monitor, autoHandoff, setPhase, setDecision, setAssistantText, advanceMinutes } = fixture()
+  monitor.setEnabled(true); await monitor.scanOnce(); monitor.setAutoHandoff(true)
+  advanceMinutes(1); setPhase(1)
+  setAssistantText('CI已通过，先查日志还是补验证，请你决定。')
+  setDecision(JSON.stringify({ needsAttention: false, stage: 'needsAgent', kind: 'none',
+    reason: '属于既有授权内的可回退选择', action: '先核对日志再补验证', summary: '验证顺序由DSH安排', evidence: '先查日志还是补验证' }))
+  await monitor.scanOnce()
+  expect(monitor.view()).toMatchObject({ attentionTotal: 0, needsYouTotal: 0 })
+  expect(monitor.routeHead('thread-a')).toMatchObject({ stage: 'needsAgent', needsYou: false })
+  expect(autoHandoff).not.toHaveBeenCalled()
+  const relay = vi.fn(), router = new CodexRouter({ store, monitor, relay })
+  expect(router.refresh()).toMatchObject({ needsYou: 0, needsAgent: 1, priorities: [
+    expect.objectContaining({ kind: 'needsAgent', task: 'continue', threadId: 'thread-a' }),
+  ] })
+})
+
+it('suppresses an unverified old question while preserving its control guard', async () => {
+  const { store, monitor } = fixture()
+  monitor.setEnabled(true); await monitor.scanOnce()
+  const state = JSON.parse(store.db.prepare("select value from kv where key='codex-monitor-v1'").get()!.value as string)
+  state.threads['thread-a'].context = []
+  state.threads['thread-a'].assessment = { version: 5, itemId: 'unknown-head', decision: { needsAttention: false,
+    stage: 'unknown', kind: 'none', reason: '没有可核实历史', action: '先核对', summary: '历史待核对' } }
+  state.threads['thread-a'].attention = { itemId: 'old-request', at: state.scannedAt,
+    decision: { needsAttention: true, stage: 'needsYou', kind: 'question', reason: '旧请求', action: '请提供资料', evidence: '请提供' } }
+  state.threads['thread-a'].userDecisionRequested = true
+  store.set('codex-monitor-v1', state)
+  expect(monitor.view()).toMatchObject({ attentionTotal: 0, needsYouTotal: 0 })
+  expect(monitor.routeHead('thread-a')?.needsYou).toBe(true)
+  const router = new CodexRouter({ store, monitor })
+  expect(router.refresh().priorities).toContainEqual(expect.objectContaining({ kind: 'needsAgent', task: 'verify' }))
+})
+
+it('keeps a real user pause across status questions and automation until a human resumes', async () => {
+  const { monitor, rpc, setDecision, advanceMinutes } = fixture()
+  monitor.setEnabled(true); await monitor.scanOnce()
+  setDecision(JSON.stringify({ needsAttention: false, stage: 'needsAgent', kind: 'none',
+    reason: '常规继续', action: '继续检查', summary: '可继续检查', evidence: '正在处理' }))
+  const original = rpc.request.getMockImplementation()!
+  const extra: unknown[] = []
+  rpc.request.mockImplementation(async (method, params, signal) => {
+    const result = await original(method, params, signal)
+    return method === 'thread/items/list' ? { ...(result as { data: unknown[] }),
+      data: [...extra, ...(result as { data: unknown[] }).data] } : result
+  })
+  const add = async (id: string, message: string) => {
+    extra.unshift({ turnId: 'turn-a', item: { id, type: 'userMessage', content: [{ type: 'text', text: message }] } })
+    advanceMinutes(6); await monitor.scanOnce()
+  }
+  await add('pause-request', '暂停当前任务，等我说继续。')
+  expect(monitor.routeHead('thread-a')).toMatchObject({ needsYou: true, pausedByUser: true })
+  expect(monitor.view().needsYouTotal).toBe(0)
+  await add('status-question', '现在进度如何？')
+  expect(monitor.routeHead('thread-a')?.pausedByUser).toBe(true)
+  await add('status-with-continue', '继续检查的结果怎么样了？')
+  expect(monitor.routeHead('thread-a')?.pausedByUser).toBe(true)
+  await add('conditional-resume', '继续检查前必须先得到我的同意。')
+  expect(monitor.routeHead('thread-a')).toMatchObject({ needsYou: true, pausedByUser: true })
+  await add('english-conditional-resume', 'Continue only after I approve it.')
+  expect(monitor.routeHead('thread-a')?.pausedByUser).toBe(true)
+  await add('automated-resume', 'DSH Superagent coordination for this existing conversation. Router message: 现在继续。')
+  expect(monitor.routeHead('thread-a')?.pausedByUser).toBe(true)
+  await add('human-resume', '请继续检查。')
+  expect(monitor.routeHead('thread-a')).toMatchObject({ needsYou: false })
+  expect(monitor.routeHead('thread-a')?.pausedByUser).toBeUndefined()
+  await add('quoted-pause', '引用日志：\n暂停当前任务，等我说继续。')
+  expect(monitor.routeHead('thread-a')?.pausedByUser).toBeUndefined()
+  await add('short-pause', '先暂停一下。')
+  expect(monitor.routeHead('thread-a')).toMatchObject({ needsYou: true, pausedByUser: true })
+})
+
 it('records ignore durably and preserves a newer pending candidate when an older one is ignored again', async () => {
   const { monitor, setDecision, setPhase, advanceMinutes } = fixture()
   monitor.setEnabled(true); await monitor.scanOnce(); monitor.setAutoHandoff(true)
